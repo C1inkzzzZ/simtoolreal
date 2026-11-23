@@ -1,7 +1,7 @@
 # 在官方 SimToolReal checkpoint 上加入速度目标做微调：第一次实验（v1）
 
 本文档说明 `velocity-finetune` 分支里每一处改动是什么、为什么这样做，以及怎么在 Zaratan 上运行。
-英文简版见 `README.md`（给 Leo）。
+英文完整版见 `README.md`（给 Leo），两份内容一致。
 
 研究问题：**在 pose 之外再给策略一个目标速度（pose + orientation + velocity goal），能否帮助需要力的工具任务？**
 这一步只做训练端：在 Isaac Gym 里把官方模型微调成能"按指定速度经过指定位姿"的策略。
