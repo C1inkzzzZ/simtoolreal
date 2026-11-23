@@ -79,6 +79,7 @@ ACC_NAMES = [
     "bonus_static",
     "bonus_strike",
     "sum_head_speed_vel",  # |v_head| on lead-in + strike steps
+    "sum_fd_vs_analytic",  # |v_fd - v_analytic| / |v_g| at the attempt (cross-check of the head velocity estimate)
 ]
 ACC = {k: i for i, k in enumerate(ACC_NAMES)}
 
@@ -100,8 +101,8 @@ class SimToolRealVelocity(SimToolReal):
             "eps_v_frac": vcfg.get("epsVFrac", [0.6, 0.25]),
             "eps_kp": vcfg.get("epsKp", [0.06, 0.03]),
             "cone_deg": vcfg.get("coneDeg", [30.0, 180.0]),
-            "speed_lo": vcfg.get("speedLo", [0.05, 0.3]),
-            "speed_hi": vcfg.get("speedHi", [0.15, 0.6]),
+            "speed_lo": vcfg.get("speedLo", [0.15, 0.3]),
+            "speed_hi": vcfg.get("speedHi", [0.35, 0.6]),
             "arm_speed_mult": vcfg.get("armSpeedMult", [1.5, 6.0]),
         }
         self.vel_geom = dict(
@@ -111,6 +112,7 @@ class SimToolRealVelocity(SimToolReal):
             down_frac=float(vcfg.get("downFrac", 0.25)),
             down_max_z=float(vcfg.get("downMaxZ", -0.85)),
             tries=int(vcfg.get("tries", 8)),
+            volume_margin=float(vcfg.get("volumeMargin", 0.1)),
         )
         cur = dict(vcfg.get("curriculum", {}) or {})
         fixed_level = cur.get("fixedLevel", None)
@@ -534,6 +536,7 @@ class SimToolRealVelocity(SimToolReal):
                 bonus_static.sum(),
                 bonus_strike.sum(),
                 (head_speed * vel_steps).sum(),
+                ((self.head_vel - self.head_vel_analytic).norm(dim=-1) / spd * af).sum(),
             ]
         )
         a += vals
@@ -572,6 +575,7 @@ class SimToolRealVelocity(SimToolReal):
                 "vel/down_frac_of_attempts": g["down_attempts"] / n_att,
                 "vel/leadin_reached": g["leadin_reached"],
                 "vel/attempts": g["attempts"],
+                "vel/fd_vs_analytic_rel": g["sum_fd_vs_analytic"] / n_att,
                 "vel/head_speed_on_vel_goals": g["sum_head_speed_vel"] / max(g["steps_leadin"] + g["steps_strike"], 1.0),
                 "static/success_rate": g["static_success"] / max(n_static_end, 1.0),
                 "static/successes": g["static_success"],
@@ -603,7 +607,7 @@ class SimToolRealVelocity(SimToolReal):
                     f"vel succ {st['vel/success_rate']:.2f} attempt {st['vel/attempt_rate']:.2f} q_v {st['vel/q_v']:.2f} "
                     f"|dv|/|vg| {st['vel/dv_rel']:.2f} speed ratio {st['vel/speed_ratio']:.2f} cos {st['vel/cos_dir']:.2f} "
                     f"head err {st['vel/head_err_at_attempt'] * 100:.1f} cm | static succ {st['static/success_rate']:.2f} | "
-                    f"infeasible {st['vel/infeasible_frac']:.2f}"
+                    f"infeasible {st['vel/infeasible_frac']:.2f} | fd-analytic {st['vel/fd_vs_analytic_rel']:.2f}"
                 )
         self.extras.update(self._vel_stats)
 

@@ -116,6 +116,17 @@ def test_sample_velocity_goals():
     print(f"    feasible {f.float().mean():.2f}, down among feasible {down.float().mean():.2f}")
     # non-down goals keep the sampled orientation
     assert torch.allclose(q[~down], quat[f][~down], atol=1e-6)
+    # strikes on the faces of the volume (where clamped delta goals land): the margin makes many more feasible
+    on_face = pos.clone()
+    on_face[:, 1] = vmax[1]
+    tight = vg.sample_velocity_goals(on_face, quat, head_offset, axis, sym, vmin, vmax, params, generator=g)
+    params_m = vg.VelocityGoalParams(cone_deg=30.0, speed_lo=0.3, speed_hi=0.6, volume_margin=0.1)
+    loose = vg.sample_velocity_goals(on_face, quat, head_offset, axis, sym, vmin, vmax, params_m, generator=g)
+    ft, fl = tight["feasible"].float().mean(), loose["feasible"].float().mean()
+    print(f"    on a face: feasible {ft:.2f} without margin, {fl:.2f} with 10 cm margin")
+    assert fl > ft
+    lead_l = loose["leadin_pos"][loose["feasible"]]
+    assert ((lead_l >= vmin - 0.1 - 1e-6) & (lead_l <= vmax + 0.1 + 1e-6)).all()
 
 
 def test_curriculum():

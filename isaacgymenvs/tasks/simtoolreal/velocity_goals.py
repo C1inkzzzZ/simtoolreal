@@ -160,6 +160,10 @@ class VelocityGoalParams:
     follow_through: float = 0.08  # m past the strike pose, along +d, must stay feasible (Leo: GoalCfg.follow_through)
     min_head_z: float = 0.58  # head center of all three points must be above this (table top is about 0.53 m)
     tries: int = 8
+    # The lead-in and follow-through points may leave the target volume by this much (m). The volume is only where
+    # official goals are sampled, and delta goals are clamped onto its faces, so without a margin most strikes near a
+    # face are infeasible (smoke test: ~55% fell back to static goals).
+    volume_margin: float = 0.0
 
 
 def sample_velocity_goals(
@@ -183,8 +187,8 @@ def sample_velocity_goals(
       * a fraction down_frac of candidates is a steep downward strike: d is drawn in the cap z <= down_max_z, then
         the tool is turned (smallest rotation) until its head axis is within cone_deg of d;
       * the others keep the sampled orientation and draw d within cone_deg of the head axis;
-      * feasible: the lead-in (p - lead_in d), strike (p) and follow-through (p + follow_through d) tool origins lie in
-        the target volume, and the head center of each is above min_head_z.
+      * feasible: the strike tool origin lies in the target volume, the lead-in (p - lead_in d) and follow-through
+        (p + follow_through d) origins within volume_margin of it, and the head center of each is above min_head_z.
 
     Returns dict with
       feasible (N,) bool, quat (N, 4) final strike orientation, v_goal (N, 3), leadin_pos (N, 3), direction (N, 3),
@@ -247,8 +251,9 @@ def sample_velocity_goals(
     vmin = volume_min.view(1, 3)
     vmax = volume_max.view(1, 3)
     ok = torch.ones(m, dtype=torch.bool, device=dev)
-    for pt in (lead, p, follow):
-        ok &= ((pt >= vmin) & (pt <= vmax)).all(-1)
+    margin = params.volume_margin
+    for pt, slack in ((lead, margin), (p, 0.0), (follow, margin)):
+        ok &= ((pt >= vmin - slack) & (pt <= vmax + slack)).all(-1)
         ok &= (pt[:, 2] + head_w[:, 2]) >= params.min_head_z
 
     ok = ok.view(n, k)

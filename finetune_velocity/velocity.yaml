@@ -14,14 +14,15 @@ minHeadZ: 0.58               # m, head center of lead-in / strike / follow-throu
 downFrac: 0.25               # fraction of steep downward strikes
 downMaxZ: -0.85              # a downward strike has direction z <= this
 tries: 8                     # candidates per goal; none feasible -> the goal stays static
+volumeMargin: 0.10           # m the lead-in / follow-through may leave the target volume (strike stays inside)
 
 # (start, end) values, interpolated by the curriculum level in [0, 1]
 sigmaFrac: [1.0, 0.25]       # reward exp(-|dv| / (sigma |v_g|)); 0.25 = Leo's final value
 epsVFrac: [0.6, 0.25]        # success (for the curriculum / logs): |dv| < eps |v_g| (Leo's eps_v_frac)
 epsKp: [0.06, 0.03]          # attempt threshold on the keypoint distance (Leo's eps_kp)
 coneDeg: [30.0, 180.0]       # max angle between strike direction and the head axis (Leo's vel_cone_deg)
-speedLo: [0.05, 0.3]         # m/s, goal speed ~ U(speedLo, speedHi); ends at Leo's 0.3-0.6
-speedHi: [0.15, 0.6]
+speedLo: [0.15, 0.3]         # m/s, goal speed ~ U(speedLo, speedHi); ends at Leo's 0.3-0.6
+speedHi: [0.35, 0.6]         # start raised after smoke v1: the released policy already hits ~0.4 m/s at the attempt
 armSpeedMult: [1.5, 6.0]     # multiplies the arm joint-target speed (released: ~0.15 rad/s)
 
 curriculum:
