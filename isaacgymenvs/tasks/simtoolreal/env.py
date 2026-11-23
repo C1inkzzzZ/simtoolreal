@@ -327,6 +327,8 @@ class SimToolReal(VecTask):
             "successes": 1,
             "reward": 1,
         }
+        # Hook for subclasses (e.g. velocity_env.SimToolRealVelocity) to register extra observation terms.
+        self.obs_type_size_dict.update(self._extra_obs_type_sizes())
 
         self.state_list = self.cfg["env"]["stateList"]
         self.obs_list = self.cfg["env"]["obsList"]
@@ -1349,6 +1351,14 @@ class SimToolReal(VecTask):
 
     def _extra_reset_rules(self, resets):
         return resets
+
+    def _extra_obs_type_sizes(self) -> dict:
+        """Extra observation terms {name: size} a subclass can list in obsList / stateList."""
+        return {}
+
+    def _add_extra_obs(self, obs_dict: dict) -> None:
+        """Fill obs_dict[name] for the terms returned by _extra_obs_type_sizes."""
+        return None
 
     def _sample_delta_goal(
         self, goal_states, delta_goal_distance, delta_rotation_degrees
@@ -3140,6 +3150,9 @@ class SimToolReal(VecTask):
         # this is where we will add the reward observation
         reward_obs_scale = 0.01
         obs_dict["reward"] = reward_obs_scale * self.rew_buf
+
+        # Hook for subclasses to add extra (clean) observation terms, used by both the critic and the policy.
+        self._add_extra_obs(obs_dict)
 
         # ##############################################################################################################
         # Create state_buf

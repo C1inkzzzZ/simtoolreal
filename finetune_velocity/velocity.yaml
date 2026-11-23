@@ -1,0 +1,42 @@
+# Velocity-goal settings, merged into task.env.velocity by launch_from_pretrained.py --task velocity.
+# Every value can be overridden on the command line, e.g. task.env.velocity.velocityGoalProb=0.3
+# Why each value: see README_zh.md (section "改动与理由").
+
+velocityGoalProb: 0.5        # fraction of new goals (after the first of an episode) that become velocity goals
+velocityOnFirstGoal: False   # the first goal of an episode (the pick-up) always stays static
+obsVelScale: 0.5             # m/s per obs unit for v_g, v_head, v_head - v_g (keeps them about in [-1.2, 1.2])
+
+# Geometry of a velocity goal (Leo's GoalCfg values)
+leadIn: 0.12                 # m, lead-in waypoint behind the strike pose (along -d)
+followThrough: 0.08          # m, past the strike pose (along +d), must stay feasible (not a goal)
+leadInTolerance: 0.03        # keypoint distance (m) that counts as reaching the lead-in; no hold, no bonus
+minHeadZ: 0.58               # m, head center of lead-in / strike / follow-through above this (table top ~0.53)
+downFrac: 0.25               # fraction of steep downward strikes
+downMaxZ: -0.85              # a downward strike has direction z <= this
+tries: 8                     # candidates per goal; none feasible -> the goal stays static
+
+# (start, end) values, interpolated by the curriculum level in [0, 1]
+sigmaFrac: [1.0, 0.25]       # reward exp(-|dv| / (sigma |v_g|)); 0.25 = Leo's final value
+epsVFrac: [0.6, 0.25]        # success (for the curriculum / logs): |dv| < eps |v_g| (Leo's eps_v_frac)
+epsKp: [0.06, 0.03]          # attempt threshold on the keypoint distance (Leo's eps_kp)
+coneDeg: [30.0, 180.0]       # max angle between strike direction and the head axis (Leo's vel_cone_deg)
+speedLo: [0.05, 0.3]         # m/s, goal speed ~ U(speedLo, speedHi); ends at Leo's 0.3-0.6
+speedHi: [0.15, 0.6]
+armSpeedMult: [1.5, 6.0]     # multiplies the arm joint-target speed (released: ~0.15 rad/s)
+
+curriculum:
+  initLevel: 0.0
+  fixedLevel: null           # set (e.g. 0.6) to freeze the level: evaluation, ablations
+  step: 0.05
+  upThreshold: 0.5           # velocity success rate of a block >= this -> level up (Leo: 0.5)
+  downThreshold: 0.2         # < this -> level down (Leo: 0.2)
+  minSamples: 2048           # finished velocity goals per decision block
+  staticGuard: 0.5           # level only rises while static goals still succeed >= 50%
+  minStepsBetween: 160       # control steps between level changes (10 PPO epochs at horizon 16)
+
+# Head "face" axis in the tool frame (+x: handle -> head) per primitive type; see velocity_env.DEFAULT_HEAD_AXIS
+headAxis: {}                 # e.g. {brush: [0.0, 0.0, -1.0]}
+symmetricHeadTypes: [hammer, eraser, brush]
+
+statsEvery: 16               # steps between reading the diagnostics back from the GPU (one PPO epoch)
+printEvery: 160              # steps between one-line summaries in the job log

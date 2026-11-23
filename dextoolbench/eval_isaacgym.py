@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import imageio
+import yaml
 import numpy as np
 import tyro
 import viser
@@ -513,6 +514,10 @@ class EvalArgs:
     z_offset: float = 0.03
     """Z offset added to start pose to avoid the table."""
 
+    extra_overrides: Tuple[str, ...] = ()
+    """Extra key=value config overrides applied after the built-in ones (values parsed as YAML), e.g.
+    task.env.velocity.curriculum.fixedLevel=0.6 for a velocity fine-tuned policy."""
+
 
 TABLE_URDF = "urdf/table_narrow.urdf"
 TABLE_WHITEBOARD_URDF = "urdf/table_narrow_whiteboard.urdf"
@@ -527,6 +532,14 @@ OBJECT_CATEGORY_TO_TABLE_URDF = {
     "marker": TABLE_WHITEBOARD_URDF,
     "brush": TABLE_URDF,
 }
+
+
+def _parse_overrides(items) -> dict:
+    out = {}
+    for item in items:
+        key, value = item.split("=", 1)
+        out[key] = yaml.safe_load(value)
+    return out
 
 
 def main():
@@ -576,6 +589,8 @@ def main():
             "task.env.numEnvs": 1,
             "task.env.envSpacing": 0.4,
             "task.env.capture_video": False,
+            # Cluster compute nodes have no graphics device: camera sensors make sim creation fail
+            "task.env.enableCameraSensors": False,
             # Goal settings
             "task.env.useFixedGoalStates": True,
             "task.env.fixedGoalStates": traj_data["goals"],
@@ -612,6 +627,7 @@ def main():
             "task.env.torqueProbRange": [0.0001, 0.0001],
             "task.env.linVelImpulseProbRange": [0.0001, 0.0001],
             "task.env.angVelImpulseProbRange": [0.0001, 0.0001],
+            **_parse_overrides(args.extra_overrides),
         },
     )
 
