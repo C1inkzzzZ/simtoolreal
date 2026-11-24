@@ -606,6 +606,28 @@ reward on). The same v1 policy with and without the lead-in:
 At the start of the curriculum (level 0), the only behavioural difference between v2 and v1 is the dense reward, so
 v2's results can be attributed to it directly. The three end values only matter once the level rises.
 
+**v2 smoke test** (`14_vel_smoke_v2`: MIG, 768 envs, 150 epochs, from the v1 final checkpoint), last 5 print windows:
+
+| Metric | Value |
+|---|---|
+| Velocity success | 0.34–0.61 (each window covers only 16 steps, so it is noisy) |
+| q_v | 0.51–0.59 |
+| cos_dir | 0.81–0.90 |
+| v_par_rel / v_perp_rel | 0.94–1.24 / 0.41–0.55 |
+| lateral / along (at the attempt) | 1.4–2.0 cm / −4.0 to −4.7 cm |
+| Static success | 0.84–0.93 |
+| dense/step | 1.20–1.36 |
+
+- **Back to v1's level**: with the lead-in restored, the metrics return to where v1 ended (cos about 0.83, success
+  about 0.45), and the dense reward is being paid normally.
+- **Where the direction error comes from** (first evidence from the new diagnostics):
+  - The attempt fires about 4.4 cm before the goal along d, with about 1.7 cm of lateral offset.
+  - If the policy is converging on the goal center at that point, its direction is off by atan(1.7/4.4) ≈ 21°. That
+    explains most of v_perp/v_par ≈ 0.5 (about 27°).
+  - The rest may come from velocity due to tool rotation (`fd_vs_analytic_rel` about 0.4).
+- **Prediction**: as the curriculum tightens epsKp from 6 cm to 1 cm, the attempt moves closer to the goal, so the
+  direction error from lateral convergence should shrink, while lateral alignment becomes more demanding.
+
 **A direction to try later** (to meet Leo's goal of dropping the lead-in):
 - No explicit intermediate goal: draw d first, then place the strike point 10–15 cm ahead of the previous goal along d.
   The tool then already starts behind the strike, and a straight approach has the right direction.
