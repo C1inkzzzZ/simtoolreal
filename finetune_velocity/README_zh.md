@@ -31,7 +31,7 @@
 | `finetune_velocity/velocity.yaml` | 速度目标的全部参数（命令行可覆盖） |
 | `finetune_velocity/expand_checkpoint.py` | 零权重扩展 checkpoint，并校验原有权重未变、新增列全为 0 |
 | `finetune_velocity/launch_from_pretrained.py` | 启动脚本：`--task static`（原 sanity）或 `--task velocity`；自动扩展权重、critic 预热、严格加载 critic |
-| `finetune_velocity/slurm/*.sbatch` | 三个作业：零初始化检查（MIG）、冒烟测试（MIG）、正式训练（A100） |
+| `finetune_velocity/slurm/*.sbatch` | 零初始化检查（MIG）、冒烟测试（MIG）、v1 正式训练（A100）、v2b 正式训练（A100，第 10 节） |
 | `finetune_velocity/tests/test_cpu.py` | CPU 单元测试，包括"扩展后输出完全不变"的数值检查 |
 | `dextoolbench/eval_isaacgym.py` | 关闭相机传感器（计算节点没有图形设备）；新增 `--extra-overrides` 参数 |
 
@@ -336,3 +336,65 @@ python dextoolbench/eval_isaacgym.py ... --config-path runs/20_vel_ft_v1/config.
 4. **与 Leo 的差别**：Leo 的奖励同样只在 attempt 时结算速度，但他先用 oracle 做了 BC（DAgger）初始化；这里只有 PPO。
 
 **v2 的候选改动**（待定）：strike 阶段加每步的速度跟踪奖励；lead-in 收紧到 2 cm；新增 attempt 时的侧向偏差和沿 d 方向距离两个诊断量；环境数加到 24576；从 v1 的最终 checkpoint 继续训练。
+
+---
+
+## 10. v2b 的改动（`30_vel_ft_v2b`）
+
+v2b 从 v1 的最终 checkpoint 继续训练。下面的改动都写在 `velocity.yaml` 里，设成 v1 的值就能还原 v1 的行为（`useLeadIn: True`、`denseVelWeight: 0`、epsKp 终点 0.03、epsVFrac 终点 0.25）。第 3 节描述的是 v1，与本节不同之处以本节为准。
+
+### 10.1 采纳 Leo 的反馈：课程终点
+
+| 参数 | v1 终点 | v2 终点 | 来源 |
+|---|---|---|---|
+| epsKp（attempt 阈值） | 3 cm | **1 cm** | Leo 实验实际使用的值（他代码里的默认值忘了改） |
+| epsVFrac（速度成功线） | 0.25 | **0.15** | 同上 |
+| σ（奖励宽度） | 0.25 | 0.25（未改） | 已向 Leo 确认：σ 是否也跟着改到 0.15。他在代码注释中写的是 σ 等于 level 1 的 eps_v |
+
+- 这三项只影响课程后期，v1 一直停在 level 0，所以它们与 v1 的结果无关。
+- 风险：0.6 m/s 时每个控制步移动 1 cm，与 1 cm 的阈值相当，可能一步跨过判定范围。level 升高后要看 `attempt_rate` 是否下降。
+
+### 10.2 去掉 lead-in 中间目标（`useLeadIn: False`，Leo 的建议）
+
+- **Leo 的理由**：lead-in 是从头训练时的补丁；我们从一个已经会 reach 的策略微调，不一定需要。
+- **现在的行为**：速度目标一开始就是 strike 位姿；助跑路线由策略自己决定。
+- **保留可行性检查**：strike 后方 12 cm、前方 8 cm 的空间仍要可行，工具头不能低于桌面。场景中依然有助跑空间，只是不再强制先到达那个点。
+- **与 v1 结论的关系**：v1 的主要误差是方向（约 33°）。我当时猜测原因之一是 lead-in 只要求 3 cm 带来的侧向偏差；去掉 lead-in 后，新的诊断量（10.4）可以直接检验这一点。另一方面，没有 lead-in，策略可能需要从目标前方绕一圈，方向误差也可能变大。这是 v2b 要回答的问题之一。
+- critic 的阶段标记那 2 维仍保留（一直显示 strike），网络结构不变，可以直接加载 v1 的权重。
+
+### 10.3 新增：strike 阶段每步的速度跟踪奖励（`denseVelWeight: 3`，上限 `denseVelBudgetFrac: 0.1`）
+
+- **做法**：strike 阶段 attempt 之前的每一步给 3 × q_v(t)，q_v 与 attempt 奖励用同一个公式和同一个 σ。每个目标累计最多 0.1 × 1000 = 100，即 attempt bonus 的 10%。
+- **为什么要加**：v1 中速度奖励只在 attempt 那一步给一次，后半程速度成功率每 100 个块只涨约 0.01，方向误差一直很大。稠密奖励让策略在接近目标的整个过程中，都能得到"方向和大小对不对"的反馈。
+- **为什么要设上限**：如果不设上限，策略可能故意不触发 attempt，持续沿 d 移动来刷每步奖励（每个目标的计时器有 600 步，600 × 3 = 1800，超过 attempt bonus）。设了 100 的上限后，奖励的大头仍是 attempt bonus。
+- 这一项不是 Leo 设计里的内容，是 v2b 新增的。v2b 是同时改了 10.2 和 10.3；如果结果需要拆开看两者各自的作用，再补跑一组"只去 lead-in"（v2a：`denseVelWeight=0`）。
+
+### 10.4 新增诊断量
+
+| 指标 | 含义 | 用途 |
+|---|---|---|
+| `vel/lateral_at_attempt` | attempt 时工具头偏离目标头部中心、垂直于 d 的距离 | 检验"侧向偏差导致方向误差" |
+| `vel/along_at_attempt` | attempt 时沿 d 方向的偏移（负数表示还没到达目标） | 看 attempt 触发得有多早 |
+| `vel/v_par_rel` | 速度沿 d 的分量 / \|v_g\| | 速度大小匹配得如何 |
+| `vel/v_perp_rel` | 速度垂直于 d 的分量 / \|v_g\| | 方向误差的大小 |
+| `bonus/dense_per_strike_step` | strike 阶段平均每步的稠密奖励 | 稠密奖励的实际量级 |
+
+### 10.5 训练设置
+
+| 项 | v1 | v2b | 理由 |
+|---|---|---|---|
+| 初始权重 | 官方 checkpoint（零扩展） | v1 最终 checkpoint `last_20_vel_ft_v1_ep_6000_rew__8364.4_.pth` | v1 已学到一部分速度控制，静态能力也没有退化 |
+| 环境数 | 12288（6 × 2048） | **24576（6 × 4096，与官方相同）** | v1 只用了约 18 GB 显存；每个 SAPG block 回到官方大小 |
+| epoch 数 | 6000 | 3500 | 每个 epoch 的数据量翻倍，3500 个 epoch 约 14 亿帧，按约 10 万 fps 估算约 4 小时 |
+| 其余 | 学习率 5e-5，critic 预热 20 epoch，successTolerance 0.01 | 相同 | |
+
+**运行**
+```bash
+git pull
+python finetune_velocity/tests/test_cpu.py
+# 先在 MIG 上冒烟（约 7 分钟）：
+sbatch --export=ALL,NAME=13_vel_smoke_v2b,CKPT=runs/20_vel_ft_v1/nn/last_20_vel_ft_v1_ep_6000_rew__8364.4_.pth \
+    finetune_velocity/slurm/2_smoke_mig.sbatch
+# 正常后提交正式训练：
+sbatch finetune_velocity/slurm/4_train_v2b_a100.sbatch
+```

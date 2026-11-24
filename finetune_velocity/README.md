@@ -36,7 +36,7 @@ given velocity.
 | `finetune_velocity/velocity.yaml` | All velocity-goal parameters (each can be overridden on the command line) |
 | `finetune_velocity/expand_checkpoint.py` | Zero-weight widening of the checkpoint, with a check that old weights are unchanged and the new columns are zero |
 | `finetune_velocity/launch_from_pretrained.py` | Launcher: `--task static` (the earlier sanity runs) or `--task velocity`; widens the checkpoint automatically, critic warmup, strict critic loading |
-| `finetune_velocity/slurm/*.sbatch` | Three jobs: zero-init check (MIG), smoke test (MIG), main training run (full A100) |
+| `finetune_velocity/slurm/*.sbatch` | Zero-init check (MIG), smoke test (MIG), v1 main run (full A100), v2b main run (full A100, section 10) |
 | `finetune_velocity/tests/test_cpu.py` | CPU unit tests, including a numerical check that widening leaves the outputs unchanged |
 | `dextoolbench/eval_isaacgym.py` | Camera sensors off (compute nodes have no graphics device); new `--extra-overrides` argument |
 
@@ -476,3 +476,82 @@ Setup: full A100, 12288 envs, 6000 epochs (about 1.18 billion frames), 4 h 28 mi
 - two new diagnostics at the attempt: lateral offset and distance along d;
 - 24576 envs;
 - continue from v1's final checkpoint.
+
+---
+
+## 10. Changes in v2b (`30_vel_ft_v2b`)
+
+v2b continues from v1's final checkpoint. All changes below live in `velocity.yaml`. Setting them back to the v1 values
+restores v1's behaviour: `useLeadIn: True`, `denseVelWeight: 0`, epsKp end 0.03, epsVFrac end 0.25. Section 3
+describes v1; where it differs from this section, this section applies.
+
+### 10.1 Leo's feedback adopted: curriculum end values
+
+| Parameter | v1 end | v2 end | Source |
+|---|---|---|---|
+| epsKp (attempt threshold) | 3 cm | **1 cm** | The value Leo actually used (his code defaults were not updated) |
+| epsVFrac (velocity success threshold) | 0.25 | **0.15** | Same |
+| σ (reward width) | 0.25 | 0.25 (unchanged) | Question sent to Leo: should σ also go to 0.15? His code comment says σ equals eps_v at level 1 |
+
+- These only affect the later curriculum. v1 never left level 0, so they are unrelated to v1's results.
+- Risk: at 0.6 m/s the head moves 1 cm per control step, about the size of the 1 cm threshold, so it may step over the
+  attempt region. Once the level rises, watch whether `attempt_rate` drops.
+
+### 10.2 No lead-in waypoint (`useLeadIn: False`, Leo's suggestion)
+
+- **Leo's reasoning**: the lead-in was a patch for training from scratch. Fine-tuning a policy that can already reach
+  may not need it.
+- **Behaviour now**: a velocity goal starts directly as the strike pose, and the policy chooses its own run-up.
+- **The feasibility check stays**: 12 cm behind and 8 cm past the strike must still be feasible, and the head must stay
+  above the table. The run-up room is still there; the policy is just no longer required to reach that point first.
+- **How this relates to v1's results**:
+  - v1's main error was direction (about 33°). One possible cause I suggested was lateral offset from the lead-in's
+    3 cm tolerance; the new diagnostics (10.4) test this directly.
+  - On the other hand, without a lead-in the policy may have to loop around from in front of the goal, which could
+    make the direction error larger. Answering this is one aim of v2b.
+- The critic's 2-dim phase input is kept (it always reads strike), so the network is unchanged and v1's weights load
+  directly.
+
+### 10.3 New: per-step velocity tracking in the strike stage (`denseVelWeight: 3`, cap `denseVelBudgetFrac: 0.1`)
+
+- **What**: each strike step before the attempt pays 3 × q_v(t), with the same formula and the same σ as the attempt
+  reward. The total per goal is capped at 0.1 × 1000 = 100, i.e. 10% of the attempt bonus.
+- **Why**: in v1 the velocity reward came only once, at the attempt. Block success then rose by only about 0.01 per
+  100 blocks in the second half, and the direction error stayed large. A dense term gives feedback on direction and
+  speed along the whole approach.
+- **Why the cap**: without it, the policy could avoid the attempt and keep moving along d to farm per-step reward
+  (each goal's timer allows 600 steps, and 600 × 3 = 1800 is more than the attempt bonus). With a cap of 100, the
+  attempt bonus remains the main reward.
+- This term is not part of Leo's design; it is new in v2b.
+- v2b changes 10.2 and 10.3 at the same time. If the two effects need to be separated, a "lead-in removed only" run
+  (v2a: `denseVelWeight=0`) can be added.
+
+### 10.4 New diagnostics
+
+| Metric | Meaning | Purpose |
+|---|---|---|
+| `vel/lateral_at_attempt` | Head offset from the goal head center perpendicular to d, at the attempt | Test whether lateral offset causes the direction error |
+| `vel/along_at_attempt` | Offset along d at the attempt (negative: the goal not reached yet) | How early the attempt fires |
+| `vel/v_par_rel` | Velocity component along d / \|v_g\| | How well the speed matches |
+| `vel/v_perp_rel` | Velocity component perpendicular to d / \|v_g\| | Size of the direction error |
+| `bonus/dense_per_strike_step` | Average dense reward per strike step | Actual size of the dense reward |
+
+### 10.5 Training setup
+
+| Item | v1 | v2b | Why |
+|---|---|---|---|
+| Initial weights | Released checkpoint (zero-widened) | v1 final checkpoint `last_20_vel_ft_v1_ep_6000_rew__8364.4_.pth` | v1 learned some velocity control and kept its static skills |
+| Envs | 12288 (6 × 2048) | **24576 (6 × 4096, as in the official setup)** | v1 used only about 18 GB of GPU memory; each SAPG block is back to the official size |
+| Epochs | 6000 | 3500 | Each epoch now has twice the data: 3500 epochs ≈ 1.4 billion frames, about 4 h at an estimated 100k fps |
+| Everything else | lr 5e-5, critic warmup 20 epochs, successTolerance 0.01 | Same | |
+
+**Running it**
+```bash
+git pull
+python finetune_velocity/tests/test_cpu.py
+# Smoke test on a MIG slice first (about 7 minutes):
+sbatch --export=ALL,NAME=13_vel_smoke_v2b,CKPT=runs/20_vel_ft_v1/nn/last_20_vel_ft_v1_ep_6000_rew__8364.4_.pth \
+    finetune_velocity/slurm/2_smoke_mig.sbatch
+# Then the main run:
+sbatch finetune_velocity/slurm/4_train_v2b_a100.sbatch
+```

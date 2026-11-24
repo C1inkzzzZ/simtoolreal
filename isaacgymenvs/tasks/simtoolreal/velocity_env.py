@@ -7,10 +7,11 @@ reason for every change are written up in finetune_velocity/README_zh.md (Chines
 Goal kinds (self.goal_kind):
   STATIC  official goal (v_g = 0): success after successSteps steps within successTolerance * keypointScale,
           bonus reachGoalBonus / successSteps per near step. Exactly the official rule.
-  LEADIN  first half of a velocity goal: the strike orientation, leadIn m behind the strike pose along -d.
-          Reached at keypoint distance <= leadInTolerance; no hold, no bonus (the keypoint reward still applies).
-  STRIKE  second half: the strike pose, observed goal velocity v_g. The first step with keypoint distance <= eps_kp
-          is the attempt; it pays reachGoalBonus * exp(-|v_head - v_g| / (sigma * |v_g|)) once and ends the goal.
+  LEADIN  (only with useLeadIn, v1) first half of a velocity goal: the strike orientation, leadIn m behind the strike
+          pose along -d. Reached at keypoint distance <= leadInTolerance; no hold, no bonus (keypoint reward applies).
+  STRIKE  the strike pose, observed goal velocity v_g. The first step with keypoint distance <= eps_kp is the attempt;
+          it pays reachGoalBonus * exp(-|v_head - v_g| / (sigma * |v_g|)) once and ends the goal. With
+          denseVelWeight > 0 (v2) the strike steps before it also pay denseVelWeight * q_v, capped per goal.
 
 v_head is the velocity of the head center (finite difference of its position over one control step), not of the
 handle-center frame the keypoints are built on.
@@ -80,6 +81,11 @@ ACC_NAMES = [
     "bonus_strike",
     "sum_head_speed_vel",  # |v_head| on lead-in + strike steps
     "sum_fd_vs_analytic",  # |v_fd - v_analytic| / |v_g| at the attempt (cross-check of the head velocity estimate)
+    "sum_lateral",  # m, head offset from the goal head center perpendicular to d, at the attempt
+    "sum_along",  # m, head offset along d at the attempt (negative: still before the goal)
+    "sum_v_par_rel",  # (v_head . d) / |v_g| at the attempt
+    "sum_v_perp_rel",  # |v_head - (v_head . d) d| / |v_g| at the attempt (the direction part of the error)
+    "dense_rew",  # dense velocity reward paid (sum over steps)
 ]
 ACC = {k: i for i, k in enumerate(ACC_NAMES)}
 
@@ -94,6 +100,13 @@ class SimToolRealVelocity(SimToolReal):
         self.vel_on_first_goal = bool(vcfg.get("velocityOnFirstGoal", False))
         self.vel_obs_scale = float(vcfg.get("obsVelScale", 0.5))
         self.vel_leadin_tol = float(vcfg.get("leadInTolerance", 0.03))
+        # v2: the lead-in waypoint is optional (Leo: it was a patch for training from scratch). When off, a velocity goal
+        # starts directly as the strike; the feasibility check still keeps room for a run-up behind it.
+        self.vel_use_lead_in = bool(vcfg.get("useLeadIn", True))
+        # v2: dense velocity tracking during the strike stage: denseVelWeight * q_v per step, at most
+        # denseVelBudgetFrac * reachGoalBonus per goal (the cap removes any incentive to avoid the attempt).
+        self.vel_dense_weight = float(vcfg.get("denseVelWeight", 0.0))
+        self.vel_dense_budget_frac = float(vcfg.get("denseVelBudgetFrac", 0.1))
         self.vel_stats_every = int(vcfg.get("statsEvery", 16))
         self.vel_print_every = int(vcfg.get("printEvery", 160))
         self.vel_ranges = {
@@ -177,6 +190,7 @@ class SimToolRealVelocity(SimToolReal):
         self.vel_goal = torch.zeros(n, 3, device=dev)
         self.vel_goal_is_down = torch.zeros(n, dtype=torch.bool, device=dev)
         self.pending_strike_pose = torch.zeros(n, 7, device=dev)
+        self.dense_paid = torch.zeros(n, device=dev)
         self.head_pos = torch.zeros(n, 3, device=dev)
         self.head_vel = torch.zeros(n, 3, device=dev)
         self.head_vel_analytic = torch.zeros(n, 3, device=dev)
@@ -273,6 +287,7 @@ class SimToolRealVelocity(SimToolReal):
         self.goal_kind[ids] = STATIC
         self.vel_goal[ids] = 0.0
         self.vel_goal_is_down[ids] = False
+        self.dense_paid[ids] = 0.0
 
     def _maybe_make_velocity_goals(self, ids: Tensor):
         draw = torch.rand(len(ids), device=self.device) < self.vel_goal_prob
@@ -302,18 +317,24 @@ class SimToolRealVelocity(SimToolReal):
         if len(ok) == 0:
             return
         quat = out["quat"][feas]
-        self.pending_strike_pose[ok, 0:3] = self.goal_states[ok, 0:3]
-        self.pending_strike_pose[ok, 3:7] = quat
         self.vel_goal[ok] = out["v_goal"][feas]
         self.vel_goal_is_down[ok] = out["is_down"][feas]
-        self.goal_kind[ok] = LEADIN
-        self.goal_states[ok, 0:3] = out["leadin_pos"][feas]
+        self.dense_paid[ok] = 0.0
+        if self.vel_use_lead_in:
+            self.pending_strike_pose[ok, 0:3] = self.goal_states[ok, 0:3]
+            self.pending_strike_pose[ok, 3:7] = quat
+            self.goal_kind[ok] = LEADIN
+            self.goal_states[ok, 0:3] = out["leadin_pos"][feas]
+        else:
+            # The sampled pose is the strike; down strikes may have turned the orientation.
+            self.goal_kind[ok] = STRIKE
         self.goal_states[ok, 3:7] = quat
         self._write_goal_actor(ok)
 
     def _start_strike(self, ids: Tensor):
         self.goal_states[ids, 0:7] = self.pending_strike_pose[ids]
         self.goal_kind[ids] = STRIKE
+        self.dense_paid[ids] = 0.0
         self._write_goal_actor(ids)
         # Same per-goal bookkeeping as SimToolReal.reset_target_pose (the keypoint reward restarts from here).
         self.reset_goal_buf[ids] = 0
@@ -440,7 +461,14 @@ class SimToolRealVelocity(SimToolReal):
             bonus_static = static_success * self.reach_goal_bonus
         # VELOCITY: paid once, on the attempt
         bonus_strike = attempt * (self.reach_goal_bonus * q_v)
-        bonus_rew = bonus_static + bonus_strike
+        # VELOCITY v2: dense tracking on the strike steps before the attempt, capped per goal
+        dense_rew = torch.zeros_like(q_v)
+        if self.vel_dense_weight > 0:
+            budget = self.vel_dense_budget_frac * self.reach_goal_bonus
+            want = self.vel_dense_weight * q_v * (is_strike & ~attempt)
+            dense_rew = torch.minimum(want, (budget - self.dense_paid).clamp_min(0.0))
+            self.dense_paid += dense_rew
+        bonus_rew = bonus_static + bonus_strike + dense_rew
 
         reward = (
             fingertip_delta_rew
@@ -490,7 +518,7 @@ class SimToolRealVelocity(SimToolReal):
 
         self._vel_accumulate(
             is_static, is_lead, is_strike, keypoint_rew, bonus_static, bonus_strike, static_success, lead_reached,
-            attempt, vel_success, q_v, dv, speed, kp_dist,
+            attempt, vel_success, q_v, dv, speed, kp_dist, dense_rew,
         )
         self._vel_update_curriculum_and_stats()
         return self.rew_buf, is_success
@@ -499,7 +527,7 @@ class SimToolRealVelocity(SimToolReal):
     # Diagnostics and curriculum
     # ------------------------------------------------------------------------------------------------------------------
     def _vel_accumulate(self, is_static, is_lead, is_strike, keypoint_rew, bonus_static, bonus_strike, static_success,
-                        lead_reached, attempt, vel_success, q_v, dv, speed, kp_dist):
+                        lead_reached, attempt, vel_success, q_v, dv, speed, kp_dist, dense_rew):
         a = self._acc
         af = attempt.float()
         spd = speed.clamp_min(1e-6)
@@ -508,6 +536,12 @@ class SimToolRealVelocity(SimToolReal):
         head_err = (self.head_pos - goal_head).norm(dim=-1)
         cos = (self.head_vel * self.vel_goal).sum(-1) / (head_speed.clamp_min(1e-6) * spd)
         down = attempt & self.vel_goal_is_down
+        d_hat = self.vel_goal / spd.unsqueeze(-1)
+        err = self.head_pos - goal_head
+        along = (err * d_hat).sum(-1)
+        lateral = (err - along.unsqueeze(-1) * d_hat).norm(dim=-1)
+        v_par = (self.head_vel * d_hat).sum(-1)
+        v_perp = (self.head_vel - v_par.unsqueeze(-1) * d_hat).norm(dim=-1)
         vel_steps = is_lead | is_strike
         vals = torch.stack(
             [
@@ -537,6 +571,11 @@ class SimToolRealVelocity(SimToolReal):
                 bonus_strike.sum(),
                 (head_speed * vel_steps).sum(),
                 ((self.head_vel - self.head_vel_analytic).norm(dim=-1) / spd * af).sum(),
+                (lateral * af).sum(),
+                (along * af).sum(),
+                (v_par / spd * af).sum(),
+                (v_perp / spd * af).sum(),
+                dense_rew.sum(),
             ]
         )
         a += vals
@@ -576,6 +615,11 @@ class SimToolRealVelocity(SimToolReal):
                 "vel/leadin_reached": g["leadin_reached"],
                 "vel/attempts": g["attempts"],
                 "vel/fd_vs_analytic_rel": g["sum_fd_vs_analytic"] / n_att,
+                "vel/lateral_at_attempt": g["sum_lateral"] / n_att,
+                "vel/along_at_attempt": g["sum_along"] / n_att,
+                "vel/v_par_rel": g["sum_v_par_rel"] / n_att,
+                "vel/v_perp_rel": g["sum_v_perp_rel"] / n_att,
+                "bonus/dense_per_strike_step": g["dense_rew"] / max(g["steps_strike"], 1.0),
                 "vel/head_speed_on_vel_goals": g["sum_head_speed_vel"] / max(g["steps_leadin"] + g["steps_strike"], 1.0),
                 "static/success_rate": g["static_success"] / max(n_static_end, 1.0),
                 "static/successes": g["static_success"],
@@ -607,7 +651,10 @@ class SimToolRealVelocity(SimToolReal):
                     f"vel succ {st['vel/success_rate']:.2f} attempt {st['vel/attempt_rate']:.2f} q_v {st['vel/q_v']:.2f} "
                     f"|dv|/|vg| {st['vel/dv_rel']:.2f} speed ratio {st['vel/speed_ratio']:.2f} cos {st['vel/cos_dir']:.2f} "
                     f"head err {st['vel/head_err_at_attempt'] * 100:.1f} cm | static succ {st['static/success_rate']:.2f} | "
-                    f"infeasible {st['vel/infeasible_frac']:.2f} | fd-analytic {st['vel/fd_vs_analytic_rel']:.2f}"
+                    f"infeasible {st['vel/infeasible_frac']:.2f} | fd-analytic {st['vel/fd_vs_analytic_rel']:.2f} | "
+                    f"v_par {st['vel/v_par_rel']:.2f} v_perp {st['vel/v_perp_rel']:.2f} "
+                    f"lateral {st['vel/lateral_at_attempt'] * 100:.1f} cm along {st['vel/along_at_attempt'] * 100:.1f} cm | "
+                    f"dense/step {st['bonus/dense_per_strike_step']:.2f}"
                 )
         self.extras.update(self._vel_stats)
 
