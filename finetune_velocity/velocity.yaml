@@ -20,7 +20,7 @@ tries: 8                     # candidates per goal; none feasible -> the goal st
 volumeMargin: 0.10           # m the lead-in / follow-through may leave the target volume (strike stays inside)
 
 # (start, end) values, interpolated by the curriculum level in [0, 1]
-sigmaFrac: [1.0, 0.25]       # reward exp(-|dv| / (sigma |v_g|)); 0.25 = Leo's final value
+sigmaFrac: [1.0, 0.15]       # reward exp(-|dv| / (sigma |v_g|)). v2: end 0.15 = Leo's eps_v at level 1 (v1: 0.25)
 epsVFrac: [0.6, 0.15]        # success (for the curriculum / logs): |dv| < eps |v_g|. v2: Leo's actual end 0.15 (v1: 0.25)
 epsKp: [0.06, 0.01]          # attempt threshold on the keypoint distance. v2: Leo's actual end 1 cm (v1: 3 cm)
 coneDeg: [30.0, 180.0]       # max angle between strike direction and the head axis (Leo's vel_cone_deg)

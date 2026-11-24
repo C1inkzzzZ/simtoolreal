@@ -110,7 +110,7 @@ class SimToolRealVelocity(SimToolReal):
         self.vel_stats_every = int(vcfg.get("statsEvery", 16))
         self.vel_print_every = int(vcfg.get("printEvery", 160))
         self.vel_ranges = {
-            "sigma_frac": vcfg.get("sigmaFrac", [1.0, 0.25]),
+            "sigma_frac": vcfg.get("sigmaFrac", [1.0, 0.15]),
             "eps_v_frac": vcfg.get("epsVFrac", [0.6, 0.25]),
             "eps_kp": vcfg.get("epsKp", [0.06, 0.03]),
             "cone_deg": vcfg.get("coneDeg", [30.0, 180.0]),

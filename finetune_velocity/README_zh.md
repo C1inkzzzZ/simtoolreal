@@ -341,7 +341,7 @@ python dextoolbench/eval_isaacgym.py ... --config-path runs/20_vel_ft_v1/config.
 
 ## 10. v2b 的改动（`30_vel_ft_v2b`）
 
-v2b 从 v1 的最终 checkpoint 继续训练。下面的改动都写在 `velocity.yaml` 里，设成 v1 的值就能还原 v1 的行为（`useLeadIn: True`、`denseVelWeight: 0`、epsKp 终点 0.03、epsVFrac 终点 0.25）。第 3 节描述的是 v1，与本节不同之处以本节为准。
+v2b 从 v1 的最终 checkpoint 继续训练。下面的改动都写在 `velocity.yaml` 里，设成 v1 的值就能还原 v1 的行为（`useLeadIn: True`、`denseVelWeight: 0`、epsKp 终点 0.03、epsVFrac 和 σ 终点 0.25）。第 3 节描述的是 v1，与本节不同之处以本节为准。
 
 ### 10.1 采纳 Leo 的反馈：课程终点
 
@@ -349,9 +349,9 @@ v2b 从 v1 的最终 checkpoint 继续训练。下面的改动都写在 `velocit
 |---|---|---|---|
 | epsKp（attempt 阈值） | 3 cm | **1 cm** | Leo 实验实际使用的值（他代码里的默认值忘了改） |
 | epsVFrac（速度成功线） | 0.25 | **0.15** | 同上 |
-| σ（奖励宽度） | 0.25 | 0.25（未改） | 已向 Leo 确认：σ 是否也跟着改到 0.15。他在代码注释中写的是 σ 等于 level 1 的 eps_v |
+| σ（奖励宽度） | 0.25 | **0.15** | 与 epsVFrac 终点一致：Leo 代码注释中 σ 等于 level 1 的 eps_v。刚好达到成功线时奖励为 exp(−1) ≈ 0.37 × 1000 |
 
-- 这三项只影响课程后期，v1 一直停在 level 0，所以它们与 v1 的结果无关。
+- 这三项只影响课程后期（level 0 时 σ 仍是 1.0），v1 一直停在 level 0，所以它们与 v1 的结果无关。
 - 风险：0.6 m/s 时每个控制步移动 1 cm，与 1 cm 的阈值相当，可能一步跨过判定范围。level 升高后要看 `attempt_rate` 是否下降。
 
 ### 10.2 去掉 lead-in 中间目标（`useLeadIn: False`，Leo 的建议）

@@ -482,7 +482,7 @@ Setup: full A100, 12288 envs, 6000 epochs (about 1.18 billion frames), 4 h 28 mi
 ## 10. Changes in v2b (`30_vel_ft_v2b`)
 
 v2b continues from v1's final checkpoint. All changes below live in `velocity.yaml`. Setting them back to the v1 values
-restores v1's behaviour: `useLeadIn: True`, `denseVelWeight: 0`, epsKp end 0.03, epsVFrac end 0.25. Section 3
+restores v1's behaviour: `useLeadIn: True`, `denseVelWeight: 0`, epsKp end 0.03, epsVFrac and σ end 0.25. Section 3
 describes v1; where it differs from this section, this section applies.
 
 ### 10.1 Leo's feedback adopted: curriculum end values
@@ -491,9 +491,9 @@ describes v1; where it differs from this section, this section applies.
 |---|---|---|---|
 | epsKp (attempt threshold) | 3 cm | **1 cm** | The value Leo actually used (his code defaults were not updated) |
 | epsVFrac (velocity success threshold) | 0.25 | **0.15** | Same |
-| σ (reward width) | 0.25 | 0.25 (unchanged) | Question sent to Leo: should σ also go to 0.15? His code comment says σ equals eps_v at level 1 |
+| σ (reward width) | 0.25 | **0.15** | Matches the epsVFrac end value: Leo's code comment says σ equals eps_v at level 1. Right at the success threshold the reward is exp(−1) ≈ 0.37 × 1000 |
 
-- These only affect the later curriculum. v1 never left level 0, so they are unrelated to v1's results.
+- These only affect the later curriculum (at level 0, σ is still 1.0). v1 never left level 0, so they are unrelated to v1's results.
 - Risk: at 0.6 m/s the head moves 1 cm per control step, about the size of the 1 cm threshold, so it may step over the
   attempt region. Once the level rises, watch whether `attempt_rate` drops.
 
