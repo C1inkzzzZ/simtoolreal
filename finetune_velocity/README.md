@@ -36,7 +36,7 @@ given velocity.
 | `finetune_velocity/velocity.yaml` | All velocity-goal parameters (each can be overridden on the command line) |
 | `finetune_velocity/expand_checkpoint.py` | Zero-weight widening of the checkpoint, with a check that old weights are unchanged and the new columns are zero |
 | `finetune_velocity/launch_from_pretrained.py` | Launcher: `--task static` (the earlier sanity runs) or `--task velocity`; widens the checkpoint automatically, critic warmup, strict critic loading |
-| `finetune_velocity/slurm/*.sbatch` | Zero-init check (MIG), smoke test (MIG), v1 main run (full A100), v2b main run (full A100, section 10) |
+| `finetune_velocity/slurm/*.sbatch` | Zero-init check (MIG), smoke test (MIG), v1 main run (full A100), v2 main run (full A100, section 11) |
 | `finetune_velocity/tests/test_cpu.py` | CPU unit tests, including a numerical check that widening leaves the outputs unchanged |
 | `dextoolbench/eval_isaacgym.py` | Camera sensors off (compute nodes have no graphics device); new `--extra-overrides` argument |
 
@@ -479,7 +479,9 @@ Setup: full A100, 12288 envs, 6000 epochs (about 1.18 billion frames), 4 h 28 mi
 
 ---
 
-## 10. Changes in v2b (`30_vel_ft_v2b`)
+## 10. Changes in v2b (smoke-tested only, no main run)
+
+> This section is the v2b design. The smoke test showed that removing the lead-in badly breaks the velocity direction, so the main run uses v2 instead (lead-in restored, the other changes kept); see section 11.
 
 v2b continues from v1's final checkpoint. All changes below live in `velocity.yaml`. Setting them back to the v1 values
 restores v1's behaviour: `useLeadIn: True`, `denseVelWeight: 0`, epsKp end 0.03, epsVFrac and σ end 0.25. Section 3
@@ -553,5 +555,68 @@ python finetune_velocity/tests/test_cpu.py
 sbatch --export=ALL,NAME=13_vel_smoke_v2b,CKPT=runs/20_vel_ft_v1/nn/last_20_vel_ft_v1_ep_6000_rew__8364.4_.pth \
     finetune_velocity/slurm/2_smoke_mig.sbatch
 # Then the main run:
-sbatch finetune_velocity/slurm/4_train_v2b_a100.sbatch
+# (v2b never got a main run; the main run is 4_train_v2_a100.sbatch, section 11)
+```
+
+---
+
+## 11. v2b smoke test results, and the final v2 setup (`31_vel_ft_v2`)
+
+**v2b smoke test** (`13_vel_smoke_v2b`: MIG, 768 envs, 150 epochs, from the v1 final checkpoint, no lead-in, dense
+reward on). The same v1 policy with and without the lead-in:
+
+| Metric | End of v1 (with lead-in) | v2b smoke (no lead-in) |
+|---|---|---|
+| Velocity success | 0.45 | **0.03–0.08** |
+| cos_dir | 0.83 (about 33° off) | **0.04–0.21 (about 80°–88° off)** |
+| q_v | 0.53 | 0.25–0.29 |
+| v_par_rel / v_perp_rel | — | 0.08–0.25 / **0.92–1.12** |
+| lateral / along (at the attempt) | — | 3.3–3.8 cm / −0.2 to −0.4 cm |
+| speed_ratio | 1.2 | 1.1–1.4 |
+| Static success | 0.89 | 0.83–0.91 |
+| dense/step | — | 0.69–0.78 |
+
+**Reading**
+
+- **What happens**: the tool slides into the goal region from the side.
+  - The velocity is almost entirely perpendicular to d (`v_perp ≈ 1`, `v_par ≈ 0.1`).
+  - The attempt fires just as the tool is level with the goal along d (`along ≈ 0`), with about 3.7 cm of lateral
+    offset.
+- **Why**: without a lead-in, the policy goes straight from the previous goal to the strike point, and that path's
+  direction has nothing to do with d. The v1 policy's 0.45 relied on the lead-in bringing it behind the strike along d.
+- **Learning a run-up alone is hard**: going behind first and then accelerating means moving away from the goal first,
+  which is a hard exploration problem. There was no sign of it within 150 epochs.
+- **Conclusion**: for **fine-tuning**, the lead-in is not just a patch for training from scratch; it is what sets the
+  approach direction. Leo's judgment came from training from scratch, and this comparison can go back to him.
+
+**Final v2 setup** (main run `31_vel_ft_v2`)
+
+| Item | v1 | v2 |
+|---|---|---|
+| Lead-in | Yes (12 cm, reached within 3 cm) | **Yes** (same as v1) |
+| Dense velocity reward | None | **3 × q_v per step, at most 100 per goal** (10.3) |
+| epsKp end | 3 cm | **1 cm** (Leo) |
+| epsVFrac end | 0.25 | **0.15** (Leo) |
+| σ end | 0.25 | **0.15** (same as epsVFrac) |
+| New diagnostics | None | **lateral / along / v_par / v_perp / dense** (10.4) |
+| Initial weights | Released checkpoint | **v1 final checkpoint** |
+| Envs | 12288 | **24576** |
+| Epochs | 6000 | 3500 |
+
+At the start of the curriculum (level 0), the only behavioural difference between v2 and v1 is the dense reward, so
+v2's results can be attributed to it directly. The three end values only matter once the level rises.
+
+**A direction to try later** (to meet Leo's goal of dropping the lead-in):
+- No explicit intermediate goal: draw d first, then place the strike point 10–15 cm ahead of the previous goal along d.
+  The tool then already starts behind the strike, and a straight approach has the right direction.
+- The cost: the tool is still rotating during the approach, which adds rotational velocity at the head.
+
+**Running it**
+```bash
+git pull
+# Smoke test (MIG, about 7 minutes)
+sbatch --export=ALL,NAME=14_vel_smoke_v2,CKPT=runs/20_vel_ft_v1/nn/last_20_vel_ft_v1_ep_6000_rew__8364.4_.pth \
+    finetune_velocity/slurm/2_smoke_mig.sbatch
+# If it looks right:
+sbatch finetune_velocity/slurm/4_train_v2_a100.sbatch
 ```

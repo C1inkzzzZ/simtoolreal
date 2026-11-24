@@ -31,7 +31,7 @@
 | `finetune_velocity/velocity.yaml` | 速度目标的全部参数（命令行可覆盖） |
 | `finetune_velocity/expand_checkpoint.py` | 零权重扩展 checkpoint，并校验原有权重未变、新增列全为 0 |
 | `finetune_velocity/launch_from_pretrained.py` | 启动脚本：`--task static`（原 sanity）或 `--task velocity`；自动扩展权重、critic 预热、严格加载 critic |
-| `finetune_velocity/slurm/*.sbatch` | 零初始化检查（MIG）、冒烟测试（MIG）、v1 正式训练（A100）、v2b 正式训练（A100，第 10 节） |
+| `finetune_velocity/slurm/*.sbatch` | 零初始化检查（MIG）、冒烟测试（MIG）、v1 正式训练（A100）、v2 正式训练（A100，第 11 节） |
 | `finetune_velocity/tests/test_cpu.py` | CPU 单元测试，包括"扩展后输出完全不变"的数值检查 |
 | `dextoolbench/eval_isaacgym.py` | 关闭相机传感器（计算节点没有图形设备）；新增 `--extra-overrides` 参数 |
 
@@ -339,7 +339,9 @@ python dextoolbench/eval_isaacgym.py ... --config-path runs/20_vel_ft_v1/config.
 
 ---
 
-## 10. v2b 的改动（`30_vel_ft_v2b`）
+## 10. v2b 的改动（只做了冒烟测试，没有正式训练）
+
+> 本节是 v2b 的设计。冒烟测试表明去掉 lead-in 会严重破坏速度方向，所以正式训练改用 v2（恢复 lead-in，其余改动保留），见第 11 节。
 
 v2b 从 v1 的最终 checkpoint 继续训练。下面的改动都写在 `velocity.yaml` 里，设成 v1 的值就能还原 v1 的行为（`useLeadIn: True`、`denseVelWeight: 0`、epsKp 终点 0.03、epsVFrac 和 σ 终点 0.25）。第 3 节描述的是 v1，与本节不同之处以本节为准。
 
@@ -396,5 +398,57 @@ python finetune_velocity/tests/test_cpu.py
 sbatch --export=ALL,NAME=13_vel_smoke_v2b,CKPT=runs/20_vel_ft_v1/nn/last_20_vel_ft_v1_ep_6000_rew__8364.4_.pth \
     finetune_velocity/slurm/2_smoke_mig.sbatch
 # 正常后提交正式训练：
-sbatch finetune_velocity/slurm/4_train_v2b_a100.sbatch
+# （v2b 没有提交正式训练；正式训练见第 11 节的 4_train_v2_a100.sbatch）
+```
+
+---
+
+## 11. v2b 冒烟测试结果，以及 v2 的最终设置（`31_vel_ft_v2`）
+
+**v2b 冒烟测试**（`13_vel_smoke_v2b`：MIG，768 个环境，150 epoch，从 v1 最终 checkpoint 开始，无 lead-in，有稠密奖励）。同一个 v1 策略，有 lead-in 和没有 lead-in 的对比：
+
+| 指标 | v1 结束时（有 lead-in） | v2b 冒烟（无 lead-in） |
+|---|---|---|
+| 速度成功率 | 0.45 | **0.03–0.08** |
+| cos_dir | 0.83（偏约 33°） | **0.04–0.21（偏约 80°–88°）** |
+| q_v | 0.53 | 0.25–0.29 |
+| v_par_rel / v_perp_rel | — | 0.08–0.25 / **0.92–1.12** |
+| lateral / along（attempt 时） | — | 3.3–3.8 cm / −0.2 到 −0.4 cm |
+| speed_ratio | 1.2 | 1.1–1.4 |
+| 静态成功率 | 0.89 | 0.83–0.91 |
+| dense/step | — | 0.69–0.78 |
+
+**解读**
+
+- 速度几乎全部垂直于 d（`v_perp ≈ 1`、`v_par ≈ 0.1`），attempt 恰好在工具与目标在 d 方向上平齐时触发（`along ≈ 0`），侧向偏差约 3.7 cm。也就是说，工具是从侧面横着进入目标区域的。
+- 原因：没有 lead-in 时，策略从上一个目标直接走向 strike 点，这条路线的方向与 d 无关。v1 策略的 0.45 正是靠 lead-in 把它带到 d 的后方。
+- 要自己学会"先绕到后方再加速"，策略需要先远离目标，这是很难探索的行为。150 个 epoch 里看不到这种迹象。
+- 结论：对**微调**来说，lead-in 不只是从头训练时的补丁，而是决定接近方向的关键。Leo 的判断基于从头训练的经验；这组数据可以反馈给他。
+
+**v2 的最终设置**（正式训练 `31_vel_ft_v2`）
+
+| 项 | v1 | v2 |
+|---|---|---|
+| lead-in | 有（12 cm，3 cm 内算到达） | **有**（与 v1 相同） |
+| 稠密速度奖励 | 无 | **3 × q_v / 步，每个目标上限 100**（10.3） |
+| epsKp 终点 | 3 cm | **1 cm**（Leo） |
+| epsVFrac 终点 | 0.25 | **0.15**（Leo） |
+| σ 终点 | 0.25 | **0.15**（与 epsVFrac 一致） |
+| 新诊断量 | 无 | **lateral / along / v_par / v_perp / dense**（10.4） |
+| 初始权重 | 官方 checkpoint | **v1 最终 checkpoint** |
+| 环境数 | 12288 | **24576** |
+| epoch | 6000 | 3500 |
+
+v2 与 v1 在课程开始阶段（level 0）的唯一行为差别是稠密奖励，所以 v2 的结果可以直接归因于稠密奖励。三个终点值只在 level 升高后才起作用。
+
+**以后可以试的方向**（回应 Leo 想去掉 lead-in 的意图）：不设显式的中间目标，而是先采样方向 d，再把 strike 点放在上一个目标沿 d 前方 10–15 cm 处。这样工具本来就在 strike 点的后方，直线接近的方向自然正确。代价是接近途中工具还在转动，会给工具头带来额外的转动速度。
+
+**运行**
+```bash
+git pull
+# 冒烟（MIG，约 7 分钟）
+sbatch --export=ALL,NAME=14_vel_smoke_v2,CKPT=runs/20_vel_ft_v1/nn/last_20_vel_ft_v1_ep_6000_rew__8364.4_.pth \
+    finetune_velocity/slurm/2_smoke_mig.sbatch
+# 正常后：
+sbatch finetune_velocity/slurm/4_train_v2_a100.sbatch
 ```

@@ -4,7 +4,7 @@
 
 velocityGoalProb: 0.5        # fraction of new goals (after the first of an episode) that become velocity goals
 velocityOnFirstGoal: False   # the first goal of an episode (the pick-up) always stays static
-useLeadIn: False             # v2 (Leo): no lead-in waypoint; v1 used True. Feasibility still keeps run-up room
+useLeadIn: True              # v2: kept (v2b smoke without it: cos 0.83 -> ~0.1, success 0.45 -> ~0.05; README sec. 11)
 denseVelWeight: 3.0          # v2: per strike step denseVelWeight * q_v before the attempt (v1: 0 = off)
 denseVelBudgetFrac: 0.1      # v2: dense reward capped at this fraction of reachGoalBonus (100) per goal
 obsVelScale: 0.5             # m/s per obs unit for v_g, v_head, v_head - v_g (keeps them about in [-1.2, 1.2])
