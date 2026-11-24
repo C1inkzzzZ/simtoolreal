@@ -423,3 +423,56 @@ and plays no part in training.
 - `fd_vs_analytic_rel` is about 0.45: the two velocity estimates differ by about 0.45 × |v_g| (about 0.1 m/s). This is
   consistent with the root linear velocity being the center-of-mass velocity rather than the origin's: when the tool
   rotates, ω × r_com is about that size. Measuring at the head by finite difference is therefore necessary.
+
+---
+
+## 9. Main run v1 results (`20_vel_ft_v1`)
+
+Setup: full A100, 12288 envs, 6000 epochs (about 1.18 billion frames), 4 h 28 min (about 73k fps on average, about
+18 GB of 40 GB GPU memory). It ended normally (`MAX EPOCHS NUM!`). Final checkpoint:
+`runs/20_vel_ft_v1/nn/last_20_vel_ft_v1_ep_6000_rew__8364.4_.pth`.
+
+**Velocity success rate per curriculum block** (each block about 2300 finished velocity goals; 1995 blocks in total):
+
+| Block | 1 | 101 | 301 | 501 | 801 | 1001 | 1301 | 1601 | 1901 | Last (1995) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Velocity success | 0.18 | 0.28 | 0.32 | 0.35 | 0.40 | 0.39 | 0.40 | 0.42 | 0.44 | **0.45** |
+| Static success | 0.85 | 0.91 | 0.89 | 0.88 | 0.88 | 0.88 | 0.90 | 0.88 | 0.89 | **0.89** |
+
+**Attempt metrics at the end of training** (last few print windows):
+
+| Metric | Value | Reading |
+|---|---|---|
+| level | 0.00 (never rose) | Going up needs block success ≥ 0.5; it ended at 0.45 |
+| attempt_rate | 0.90–0.92 | Most velocity goals reach the strike |
+| q_v | 0.53–0.54 | 0.34–0.46 in the smoke test |
+| \|dv\|/\|v_g\| | 0.69–0.73 | Relative velocity error |
+| speed_ratio | 1.17–1.22 | Speed about 20% too high |
+| cos_dir | 0.83–0.84 | About 33° off in direction; the main source of error |
+| head_err_at_attempt | 5.0 cm | Unchanged throughout |
+| infeasible_frac | 0.02–0.03 | |
+| fd_vs_analytic_rel | 0.36–0.39 | |
+
+**Conclusions**
+
+1. **No forgetting**: static-goal success stayed at 0.88–0.90 throughout, the same as in the zero-init check (0.887).
+   Keeping 50% static goals and a small learning rate works.
+2. **Velocity control is being learned, but slowly**: block success rose from 0.18 to 0.45, but only by about 0.01 per
+   100 blocks in the second half. It did not cross 0.5 in this run, so the curriculum stayed at level 0 (σ = 1,
+   epsKp = 6 cm, cone 30°, speed 0.15–0.35 m/s, arm ×1.5).
+3. **The error is mainly direction, not magnitude**: the speed is about 20% too high, but the direction is about 33° off,
+   so most of |dv|/|v_g| ≈ 0.7 is perpendicular to d. My reading:
+   - the lead-in only requires 3 cm, and the attempt fires 6 cm before the strike;
+   - the released policy has learned to head straight for the goal center, so lateral offset turns into direction
+     error;
+   - the velocity reward is paid only once, at the attempt, which is too sparse to teach the policy to line up
+     laterally in advance.
+4. **Difference from Leo**: Leo's reward also settles velocity only at the attempt, but he first initialized with BC
+   (DAgger) from an oracle; here there is only PPO.
+
+**Candidate changes for v2** (not decided yet):
+- a per-step velocity-tracking reward in the strike stage;
+- lead-in tightened to 2 cm;
+- two new diagnostics at the attempt: lateral offset and distance along d;
+- 24576 envs;
+- continue from v1's final checkpoint.
