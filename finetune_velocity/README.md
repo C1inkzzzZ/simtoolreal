@@ -745,3 +745,36 @@ starting at level 0.10.
 sbatch --export=ALL,NAME=15_vel_smoke_diag,CKPT=runs/31_vel_ft_v2/nn/last_31_vel_ft_v2_ep_3500_rew__10311.79_.pth,EXTRA=task.env.velocity.curriculum.initLevel=0.1 \
     finetune_velocity/slurm/2_smoke_mig.sbatch
 ```
+
+**Diagnosis results** (`15_vel_smoke_diag`: MIG, 768 envs, 150 epochs, from the v2 final policy, level 0.15, last 5
+print windows):
+
+| | When the lead-in is reached | At the attempt |
+|---|---|---|
+| Lateral distance | 1.5–1.7 cm | 1.7–2.1 cm |
+| Position along d | −10.9 to −11.1 cm | −3.1 to −3.7 cm |
+| Velocity along d, v_par / \|v_g\| | **−0.26 to −0.37** | 0.90–1.09 |
+| Perpendicular velocity, v_perp / \|v_g\| | **0.55–0.72** | 0.40–0.55 |
+
+The other metrics are close to the end of v2: velocity success 0.24–0.51, cos 0.72–0.87, static success 0.87–0.95.
+
+**Reading**
+
+1. **Lateral position is not the problem**: the lateral offset is already only about 1.6 cm when the lead-in is
+   reached, and about 1.9 cm at the attempt, almost unchanged. Tightening the lead-in tolerance from 3 cm to 1.5 cm
+   (the original option A) would therefore do almost nothing for the lateral position.
+2. **The problem is the velocity when the lead-in is reached**:
+   - The velocity along d is **negative** (about −0.3 |v_g|): the tool arrives at the lead-in moving **backwards**,
+     coming back from the strike side.
+   - On top of that there is about 0.6 |v_g| of sideways velocity.
+   - Why: the previous goal is near the strike point (delta sampling keeps it ≤ 10 cm away), while the lead-in is 12 cm
+     behind the strike, so the policy has to move along −d to reach it. With no hold, the goal switches to the strike
+     the moment the tool enters the 3 cm region.
+3. **What this does to the run-up**: within the 12 cm run-up, the policy first has to cancel the backward and sideways
+   velocity, then accelerate along d. The size of the lateral offset barely changes, but the sideways velocity persists
+   the whole time: the head keeps crossing from one side of the line to the other, and at the attempt there is still
+   about 0.46 |v_g| of perpendicular velocity.
+4. **Conclusion**: the root cause of the direction error is the wrong motion state at the start of the run-up, not an
+   inaccurate start position.
+   - The original option A does not address it.
+   - B (shaping for moving along the line) would only address it indirectly.

@@ -545,3 +545,21 @@ sbatch finetune_velocity/slurm/4_train_v2_a100.sbatch
 sbatch --export=ALL,NAME=15_vel_smoke_diag,CKPT=runs/31_vel_ft_v2/nn/last_31_vel_ft_v2_ep_3500_rew__10311.79_.pth,EXTRA=task.env.velocity.curriculum.initLevel=0.1 \
     finetune_velocity/slurm/2_smoke_mig.sbatch
 ```
+
+**诊断结果**（`15_vel_smoke_diag`：MIG，768 个环境，150 epoch，从 v2 最终策略开始，level 0.15，最后 5 个打印窗口）：
+
+| | 到达 lead-in 时 | attempt 时 |
+|---|---|---|
+| 侧向距离 lateral | 1.5–1.7 cm | 1.7–2.1 cm |
+| 沿 d 的位置 along | −10.9 到 −11.1 cm | −3.1 到 −3.7 cm |
+| 沿 d 的速度 v_par / \|v_g\| | **−0.26 到 −0.37** | 0.90–1.09 |
+| 垂直速度 v_perp / \|v_g\| | **0.55–0.72** | 0.40–0.55 |
+
+其余指标与 v2 结束时相近：速度成功率 0.24–0.51，cos 0.72–0.87，静态成功率 0.87–0.95。
+
+**解读**
+
+1. **侧向位置不是问题**：到达 lead-in 时侧向偏差已经只有约 1.6 cm，到 attempt 时约 1.9 cm，几乎不变。所以把 lead-in 容差从 3 cm 收紧到 1.5 cm（原方案 A），对侧向位置几乎没有作用。
+2. **问题在于到达 lead-in 时的速度**：沿 d 的速度是**负的**（约 −0.3 |v_g|），也就是工具是**倒着**、从 strike 那一侧退到 lead-in 的；同时还有约 0.6 |v_g| 的侧向速度。原因是上一个目标在 strike 点附近（delta 采样距上一个目标 ≤ 10 cm），而 lead-in 在 strike 后方 12 cm，所以策略要往 −d 方向走才能到达 lead-in；又因为不要求停留，一进入 3 cm 范围就立刻切换到 strike。
+3. 所以策略在 12 cm 的助跑里，要先抵消往回走和横向的速度，再沿 d 加速。侧向距离的大小基本没变，但横向速度在这段时间里一直存在，工具头在直线两侧来回穿过，到 attempt 时仍有约 0.46 |v_g| 的垂直速度。
+4. **结论**：方向误差的根源是"助跑开始时的运动状态不对"，而不是起点位置不准。原方案 A 不对症；B（沿直线的 shaping）也只能间接处理这个问题。
