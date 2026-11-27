@@ -921,3 +921,57 @@ sbatch --export=ALL,TASK=trajectory,NAME=16_traj_smoke,CKPT=runs/31_vel_ft_v2/nn
 # main run (A100); CKPT depends on the initial-model decision
 sbatch --export=ALL,NAME=40_traj_v1,CKPT=<checkpoint> finetune_velocity/slurm/6_train_traj_a100.sbatch
 ```
+
+## 16. Trajectory smoke test 1 (`16_traj_smoke`, job 24298137) and two fixes
+
+The smoke run (MIG, starting from v2's final checkpoint) finished without errors, so the whole pipeline works in
+Isaac Gym: widened checkpoint, new observations, phases, waypoint passing, curriculum and logs.
+
+**What looked right**
+- Static success rate 0.91–0.95: the hold goals did not degrade.
+- Abandon rate 0–0.02, and far more blocks completed than failed.
+- Mean head speed on moving waypoints (0.20–0.23 m/s) matches the mean goal speed (0.22–0.23 m/s).
+
+**Problem 1: waypoints advanced too early.**
+- 98–100% of passes were triggered by the "reached" condition, and at that moment the head was still about 4.4 cm
+  short of the waypoint (`along −4.4 cm`, keypoint distance 5.1 cm).
+- Cause: "reached" used the curriculum tolerance eps_kp, which is 6 cm at level 0, while waypoints are only 3 cm
+  apart. With a tolerance larger than the spacing, the tool can lag one or two waypoints behind and still "reach"
+  them. The goal then moves on, and the reward pays for lagging.
+- Fix: the advance rule and the success rule are now separate.
+  - The goal advances when the head crosses the waypoint's normal plane, or when the keypoint distance is at most
+    `reachDist` = 1.5 cm. 1.5 cm is half the spacing, so the goal can never move on while the tool is a whole
+    waypoint behind.
+  - The curriculum tolerance eps_kp (6 cm → 1 cm) is used only to decide whether a pass counts as a success (position
+    within eps_kp and velocity error < eps_v × max(|v_g|, 0.1)). It no longer decides when the goal advances.
+  - The reward at a pass is unchanged (B × q_pos × q_v). Because passes now happen closer to the waypoint, q_pos is
+    computed at a more meaningful point.
+
+**Problem 2: too little time on moving waypoints (5–8% of steps).**
+- Most time went to static holds. Every motion block needs two "move there and hold" goals (the set pose before and
+  the end stop after), and 40% of blocks are static blocks anyway. The velocity-tracking signal was diluted.
+- Fix: **chained blocks.** When a block's end stop is held, then with probability `chainProb` = 0.5 the next motion
+  block starts right there: the goal goes straight to its first moving waypoint, with no new set pose.
+  - The end stop is already a state at rest, so it is a valid start for the next block. This saves one move and one
+    hold per chained block.
+  - It also produces "stop → move → stop → move" sequences, which is what long-horizon tool use looks like (several
+    strokes in a row, sweeping back and forth).
+  - Cost: a chained block cannot be a turned-down strike, because that needs the tool orientation to be turned first,
+    which would need a hold. Chained blocks therefore use `down_frac` = 0. Downward strikes still come from blocks that
+    start at a fresh set pose.
+  - The other 50% of end stops, and all PLAIN goals, take the official path as before: a new delta goal, which may
+    become a new block's set pose.
+  - The new stat `traj/chained_frac` (and "chained" in the `[trajectory]` line) is the share of started blocks that
+    were chained; it should be about 0.5 × the share of blocks that reach their end stop.
+
+**Expected in smoke test 2**
+- The share of passes by "reached" drops a lot (most passes become crossings), and `along` and the keypoint distance
+  at a pass get much smaller.
+- The share of steps on moving waypoints rises.
+- `chained` is about 0.5.
+- Static success should stay around 0.9.
+
+```bash
+sbatch --export=ALL,TASK=trajectory,NAME=17_traj_smoke2,CKPT=runs/31_vel_ft_v2/nn/last_31_vel_ft_v2_ep_3500_rew__10311.79_.pth \
+    finetune_velocity/slurm/2_smoke_mig.sbatch
+```

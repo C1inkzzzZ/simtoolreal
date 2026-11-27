@@ -138,7 +138,7 @@ def test_slerp():
 
 
 def test_waypoint_pass():
-    P = tg.PassParams(eps_kp=0.02, sigma_pos=0.02, sigma_v=0.5, eps_v=0.5)
+    P = tg.PassParams(eps_kp=0.02, sigma_pos=0.02, sigma_v=0.5, eps_v=0.5, reach_dist=0.015)
     wp_head = torch.zeros(5, 3)
     wp_tan = torch.tensor([[1.0, 0.0, 0.0]]).expand(5, 3).clone()
     wp_vel = 0.4 * wp_tan
@@ -148,13 +148,16 @@ def test_waypoint_pass():
     kp = torch.tensor([0.01, 0.06, 0.06, 0.2, 0.012])
     out = tg.waypoint_pass(kp, head, vel, wp_head, wp_tan, wp_vel, P)
     assert out["passed"].tolist() == [True, False, True, False, True]
-    assert out["reached"].tolist() == [True, False, False, False, True]
+    assert out["reached"].tolist() == [True, False, False, False, True]  # 0.010 and 0.012 <= reach_dist 0.015
     assert out["crossed"].tolist() == [False, False, True, False, False]
     assert out["abandon"].tolist() == [False, False, False, True, False]
     assert out["success"].tolist() == [True, False, False, False, False]  # last: |dv| 0.3 > 0.5 * 0.4
     assert abs(out["q_v"][0].item() - 1.0) < 1e-6
     assert abs(out["lateral"][2].item() - 0.05) < 1e-6
     assert abs(out["v_perp_rel"][2].item() - 0.5) < 1e-6
+    # far but within eps_kp: no advance by reaching (only crossing would), yet a pass there would count as success
+    far = tg.waypoint_pass(torch.tensor([0.018]), head[:1], vel[:1], wp_head[:1], wp_tan[:1], wp_vel[:1], P)
+    assert not far["reached"].item() and far["success"].item()
     # slow waypoint: the velocity reference is floored at v_floor
     out2 = tg.waypoint_pass(kp[:1], head[:1], torch.zeros(1, 3), wp_head[:1], wp_tan[:1], 0.01 * wp_tan[:1], P)
     assert abs(out2["dv_rel"][0].item() - 0.01 / 0.1) < 1e-5

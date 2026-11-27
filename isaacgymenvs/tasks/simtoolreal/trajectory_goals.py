@@ -313,25 +313,28 @@ def sample_motion_chunks(
 # ----------------------------------------------------------------------------------------------------------------------
 @dataclass
 class PassParams:
-    eps_kp: float  # m, keypoint distance that counts as reaching the waypoint
+    eps_kp: float  # m, keypoint distance within which a pass counts as a success (with the velocity condition)
     sigma_pos: float  # m, q_pos = exp(-kp_dist / sigma_pos)
     sigma_v: float  # q_v = exp(-|dv| / (sigma_v * max(|v_g|, v_floor)))
     eps_v: float  # velocity success: |dv| < eps_v * max(|v_g|, v_floor)
     v_floor: float = 0.1  # m/s, so that slow waypoints near the ends are not judged on a tiny |v_g|
     abandon_dist: float = 0.15  # m, head farther than this from the waypoint's head center abandons the block
+    reach_dist: float = 0.015  # m, keypoint distance that advances without crossing (kept below half the spacing so
+    # the goal never moves on while the tool is still a waypoint or more behind; smoke test 1: eps_kp 6 cm > spacing)
 
 
 def waypoint_pass(kp_dist: Tensor, head_pos: Tensor, head_vel: Tensor, wp_head: Tensor, wp_tan: Tensor,
                   wp_vel: Tensor, p: PassParams):
     """Per env (moving waypoint is the current goal). All (N,) except vectors (N, 3).
 
-    reached: keypoint distance <= eps_kp. crossed: the head is past the waypoint's normal plane (along the tangent).
+    reached: keypoint distance <= reach_dist. crossed: the head is past the waypoint's normal plane (along the tangent).
     passed = reached | crossed; abandon: head farther than abandon_dist from the waypoint (and not passed).
+    success (at a pass): keypoint distance <= eps_kp and |dv| < eps_v * max(|v_g|, v_floor).
     """
     rel = head_pos - wp_head
     along = (rel * wp_tan).sum(-1)
     lateral = (rel - along.unsqueeze(-1) * wp_tan).norm(dim=-1)
-    reached = kp_dist <= p.eps_kp
+    reached = kp_dist <= p.reach_dist
     crossed = along >= 0.0
     passed = reached | crossed
     abandon = (~passed) & (rel.norm(dim=-1) > p.abandon_dist)
@@ -339,7 +342,7 @@ def waypoint_pass(kp_dist: Tensor, head_pos: Tensor, head_vel: Tensor, wp_head: 
     dv = (head_vel - wp_vel).norm(dim=-1)
     q_pos = torch.exp(-kp_dist / p.sigma_pos)
     q_v = torch.exp(-dv / (p.sigma_v * speed_ref))
-    success = reached & (dv < p.eps_v * speed_ref)
+    success = (kp_dist <= p.eps_kp) & (dv < p.eps_v * speed_ref)
     v_par = (head_vel * wp_tan).sum(-1)
     v_perp = (head_vel - v_par.unsqueeze(-1) * wp_tan).norm(dim=-1)
     return dict(reached=reached, crossed=crossed, passed=passed, abandon=abandon, q_pos=q_pos, q_v=q_v,

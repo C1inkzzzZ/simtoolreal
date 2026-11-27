@@ -35,7 +35,7 @@ T_ACC_NAMES = [
     "passes", "reached", "crossed", "pass_success", "sum_qpos", "sum_qv", "sum_dv_rel", "sum_v_par_rel",
     "sum_v_perp_rel", "sum_lateral", "sum_along", "sum_kp_at_pass", "sum_head_speed_move", "sum_goal_speed_move",
     "static_success", "static_fail", "steps_hold", "steps_move", "kp_rew_hold", "kp_rew_move", "bonus_hold",
-    "bonus_move", "sum_fd_vs_analytic",
+    "bonus_move", "sum_fd_vs_analytic", "blocks_chained",
 ]
 T_ACC = {k: i for i, k in enumerate(T_ACC_NAMES)}
 
@@ -46,6 +46,9 @@ class SimToolRealTrajectory(SimToolRealVelocity):
         self.tcfg = tcfg
         self.traj_motion_prob = float(tcfg.get("motionBlockProb", 0.6))
         self.traj_pass_budget = float(tcfg.get("passBudget", 1.0))
+        # after an end stop, start the next block right there (no new set pose) with this probability
+        self.traj_chain_prob = float(tcfg.get("chainProb", 0.5))
+        self.traj_reach_dist = float(tcfg.get("reachDist", 0.015))
         self.traj_ranges = {
             "v_max": tcfg.get("vMax", [0.35, 0.6]),
             "bend_deg": tcfg.get("bendDeg", [0.0, 90.0]),
@@ -103,7 +106,8 @@ class SimToolRealTrajectory(SimToolRealVelocity):
             arc_max_deg=c["arc_max_deg"], **self.traj_fixed,
         )
         self.pass_params = PassParams(eps_kp=c["eps_kp"], sigma_pos=c["sigma_pos"], sigma_v=c["sigma_v"],
-                                      eps_v=c["eps_v"], v_floor=self.traj_v_floor, abandon_dist=self.traj_abandon)
+                                      eps_v=c["eps_v"], v_floor=self.traj_v_floor, abandon_dist=self.traj_abandon,
+                                      reach_dist=self.traj_reach_dist)
         self._vel_arm_mult = c["arm_speed_mult"]
         # the velocity env's own dict (used in its print / stats code paths) stays defined
         self.vel_cur = {k: lerp(v, lv) for k, v in self.vel_ranges.items()}
@@ -196,29 +200,40 @@ class SimToolRealTrajectory(SimToolRealVelocity):
             vel = self.traj_vel[sel, i] if phase == MOVE else torch.zeros(len(sel), 3, device=self.device)
             self._set_goal(sel, self.traj_pos[sel, i], self.traj_quat[sel, i], vel, phase)
 
-    def _maybe_start_blocks(self, ids: Tensor):
-        """ids just got an official delta goal: turn some into motion blocks (that goal becomes the set pose)."""
-        sel = ids[torch.rand(len(ids), device=self.device) < self.traj_motion_prob]
-        if len(sel) == 0:
-            return
+    def _sample_blocks(self, sel: Tensor, chained: bool) -> Tensor:
+        """Sample motion blocks starting at the current goal pose of `sel`; store them; return the feasible ids."""
+        params = self.traj_params
+        if chained:  # the tool is already at rest at the end stop: no turn for a downward start (it would need a hold)
+            params = TrajParams(**{**params.__dict__, "down_frac": 0.0})
         out = sample_motion_chunks(
             self.goal_states[sel, 0:3], self.goal_states[sel, 3:7], self.head_offset[sel], self.head_axis[sel],
-            self.head_axis_symmetric[sel], self._vel_volume[0], self._vel_volume[1], self.traj_params,
+            self.head_axis_symmetric[sel], self._vel_volume[0], self._vel_volume[1], params,
         )
         feas = out["feasible"]
         self._tacc[T_ACC["blocks_sampled"]] += len(sel)
         self._tacc[T_ACC["blocks_infeasible"]] += (~feas).sum()
         ok = sel[feas]
         if len(ok) == 0:
-            return
+            return ok
         for name, buf in (("wp_pos", self.traj_pos), ("wp_quat", self.traj_quat), ("wp_vel", self.traj_vel),
                           ("wp_tan", self.traj_tan), ("wp_head", self.traj_head)):
             buf[ok] = out[name][feas]
         self.traj_n[ok] = out["n_wp"][feas]
         self.traj_idx[ok] = 0
+        if not chained:
+            # the set pose may have been turned so that the head faces a downward start direction
+            self.goal_states[ok, 3:7] = out["set_quat"][feas]
+        return ok
+
+    def _maybe_start_blocks(self, ids: Tensor):
+        """ids just got an official delta goal: turn some into motion blocks (that goal becomes the set pose)."""
+        sel = ids[torch.rand(len(ids), device=self.device) < self.traj_motion_prob]
+        if len(sel) == 0:
+            return
+        ok = self._sample_blocks(sel, chained=False)
+        if len(ok) == 0:
+            return
         self.phase[ok] = SET
-        # the set pose may have been turned so that the head faces a downward start direction
-        self.goal_states[ok, 3:7] = out["set_quat"][feas]
         self._write_goal_actor(ok)
 
     def reset_target_pose(self, env_ids: Tensor, reset_buf_idxs=None, tensor_reset=True, is_first_goal=True) -> None:
@@ -236,12 +251,20 @@ class SimToolRealTrajectory(SimToolRealVelocity):
             return
 
         ids = env_ids.long()
+        chained = ids[:0]
         if is_first_goal:
             fresh, move, set_done = ids, ids[:0], ids[:0]
         else:
             ph = self.phase[ids]
             move, set_done = ids[ph == MOVE], ids[ph == SET]
-            fresh = ids[(ph == PLAIN) | (ph == END)]
+            end_done = ids[ph == END]
+            # after an end stop, the next block can start right there (the tool is at rest): chained blocks
+            chain_try = end_done[torch.rand(len(end_done), device=self.device) < self.traj_chain_prob]
+            if len(chain_try) > 0:
+                chained = self._sample_blocks(chain_try, chained=True)
+            keep = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+            keep[chained] = False
+            fresh = ids[((ph == PLAIN) | (ph == END)) & keep[ids]]
         if len(move) > 0:
             nxt = torch.where(self.abandon_flag[move], self.traj_n[move] - 1, self.traj_idx[move] + 1)
             self.abandon_flag[move] = False
@@ -249,6 +272,10 @@ class SimToolRealTrajectory(SimToolRealVelocity):
         if len(set_done) > 0:
             self._tacc[T_ACC["blocks_started"]] += len(set_done)
             self._go_to_waypoint(set_done, torch.zeros_like(set_done))
+        if len(chained) > 0:
+            self._tacc[T_ACC["blocks_started"]] += len(chained)
+            self._tacc[T_ACC["blocks_chained"]] += len(chained)
+            self._go_to_waypoint(chained, torch.zeros_like(chained))
         if len(fresh) > 0:
             SimToolReal.reset_target_pose(self, fresh, None, tensor_reset=True, is_first_goal=is_first_goal)
             self._set_static(fresh)
@@ -391,7 +418,7 @@ class SimToolRealTrajectory(SimToolRealVelocity):
             (pp["along"] * pf).sum(), (kp_dist * pf).sum(), (head_speed * is_move).sum(), (goal_speed * is_move).sum(),
             static_success.float().sum(), zero, is_hold.float().sum(), is_move.float().sum(),
             (keypoint_rew * is_hold).sum(), (keypoint_rew * is_move).sum(), bonus_hold.sum(), bonus_move.sum(),
-            (fd_rel * pf).sum(),
+            (fd_rel * pf).sum(), zero,
         ])
         self._tacc += vals
         # curriculum blocks: moving-waypoint success over passed + abandoned (+ missed at reset), static guard
@@ -414,6 +441,7 @@ class SimToolRealTrajectory(SimToolRealVelocity):
                 "traj/infeasible_frac": g["blocks_infeasible"] / max(g["blocks_sampled"], 1.0),
                 "traj/blocks_started": g["blocks_started"], "traj/blocks_completed": g["blocks_completed"],
                 "traj/blocks_failed": g["blocks_failed"],
+                "traj/chained_frac": g["blocks_chained"] / max(g["blocks_started"], 1.0),
                 "traj/abandon_rate": g["abandons"] / max(g["passes"] + g["abandons"], 1.0),
                 "traj/pass_success_rate": g["pass_success"] / max(g["passes"] + g["abandons"], 1.0),
                 "traj/reached_frac_of_passes": g["reached"] / n_pass,
@@ -453,7 +481,8 @@ class SimToolRealTrajectory(SimToolRealVelocity):
                     f"lateral {st['traj/lateral_at_pass'] * 100:.1f} cm | speed head/goal "
                     f"{st['traj/head_speed_moving']:.2f}/{st['traj/goal_speed_moving']:.2f} | static succ "
                     f"{st['static/success_rate']:.2f} | blocks done {st['traj/blocks_completed']:.0f} failed "
-                    f"{st['traj/blocks_failed']:.0f} infeasible {st['traj/infeasible_frac']:.2f} | "
+                    f"{st['traj/blocks_failed']:.0f} chained {st['traj/chained_frac']:.2f} "
+                    f"infeasible {st['traj/infeasible_frac']:.2f} | "
                     f"moving steps {st['traj/frac_steps_moving']:.2f}"
                 )
         self.extras.update(self._vel_stats)
