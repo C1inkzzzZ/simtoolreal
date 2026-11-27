@@ -6,16 +6,18 @@ passBudget: 1.0             # all moving waypoints of a block together pay up to
 vFloor: 0.1                 # m/s, velocity error is judged relative to max(|v_g|, vFloor)
 abandonDist: 0.15           # m, head farther than this from the current waypoint abandons the rest of the block
 reachDist: 0.015            # m, keypoint distance that advances a moving waypoint without crossing it (< spacing / 2)
-chainProb: 0.5              # after an end stop, start the next block right there (no new set pose)
+chainProb: 0.75             # after an end stop, start the next block right there (no new set pose); smoke 2: 0.5 gave
+                            # only 16-19% moving steps at level 0
 
 # sampler constants (trajectory_goals.TrajParams)
 aMax: 3.0                   # m/s^2 along the path
 spacing: 0.03               # m between waypoints
 kMax: 48                    # waypoints per block at most
-downFrac: 0.25              # blocks whose start direction is steep downward
+downFrac: 0.5               # blocks (from a fresh set pose) whose start direction is steep downward; chained blocks use 0,
+                            # so with chainProb 0.75 about 1/4 of blocks are fresh and ~12% of all blocks start downward
 volumeMargin: 0.10          # m the moving waypoints may leave the target volume (end stops stay inside)
 minHeadZ: 0.58              # head center above this everywhere (table top ~0.53)
-tries: 8
+tries: 16                   # sampling attempts per block (smoke 2: 23-32% infeasible with 8)
 
 # (start, end) values, interpolated by the curriculum level in [0, 1]
 vMax: [0.35, 0.6]           # m/s, peak head speed limit of a block

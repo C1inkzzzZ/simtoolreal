@@ -994,3 +994,43 @@ sbatch --export=ALL,TASK=trajectory,NAME=17_traj_smoke2,CKPT=runs/31_vel_ft_v2/n
   epochs are not enough to judge learning trends.
 - About 23–32% of sampled blocks are infeasible even at level 0 (these fall back to plain static goals, so the
   effective motion-block share is about 0.6 × 0.72 ≈ 0.43). This is a cost, not a bug; if needed, raise `tries`.
+
+**Changes after smoke test 2 (config only).**
+- `chainProb` 0.5 → 0.75: chains average 4 blocks instead of 2, which saves more "go to a new set pose and hold"
+  goals. Expected moving-step share at level 0: about 25–30% instead of 16–19%. It rises further with the curriculum,
+  because chunks get longer.
+- `tries` 8 → 16: more sampling attempts per block, to lower the 23–32% infeasible share. It only costs a little
+  extra work at goal resets. It may help only partly if infeasibility mostly comes from set poses near the edge of the
+  volume.
+- `downFrac` 0.25 → 0.5: chained blocks never start downward, and with chainProb 0.75 only about 1/4 of blocks start
+  from a fresh set pose. Raising downFrac for those keeps downward strikes at about 12% of all blocks, as before.
+- The 40% static blocks (`motionBlockProb` 0.6) are kept: holds are the official skill, and keeping them guards
+  against forgetting.
+
+## 17. If the main run looks poor: which setting to look at
+
+There are many settings, but they fall into four groups, and they matter in very different ways. The logs are split
+so that each failure points to one group, rather than to a blind search over all of them.
+
+| Group | Settings | Role | How sensitive |
+|---|---|---|---|
+| Task definition | vMax, bendDeg, rotMaxDeg, nSegMax, pArc, arcMaxDeg, volume | *What* the policy should learn. Calibrated against DexToolBench coverage and real tool motions (section 14), not tuned for score | Changing them changes the question; tune only when evaluation shows missing coverage |
+| Judging and reward | epsKp, epsV, sigmaPos, sigmaV, passBudget, reachDist, vFloor | How a pass is scored and when the curriculum advances | Most sensitive; first suspect when learning stalls |
+| Sampling mix | motionBlockProb, chainProb, downFrac, tries | How often each kind of goal appears | Mainly affects learning speed; within a factor of about 2, every goal type still appears often, so final performance should not depend much on it |
+| Optimization | lr, critic warmup, number of envs | Inherited from v1 and v2, which trained stably | Low; change only if training is unstable |
+
+| Symptom in the logs | Likely cause | What to change |
+|---|---|---|
+| Curriculum stuck at a level, waypoint success flat | Tolerance too strict at that level, or reward too flat | Judging group: look at whether q_pos or q_v is low, then epsKp/sigmaPos or epsV/sigmaV, or a smaller curriculum step |
+| Position fine (small lateral, high q_pos) but velocity poor (low q_v, high v_perp) | Velocity term too weak | sigmaV, or the velocity weight in the pass reward |
+| Static success falls below about 0.8 | Too much motion, or forgetting | Sampling mix (more static, lower chainProb) or lower lr |
+| High abandon rate | Trajectories too hard for the current level | Curriculum ranges or step size |
+| High infeasible share | Set poses near the volume edge | tries, volume margin |
+| Training metrics good, but poor on held-out test trajectories | Missing coverage, not tuning | Task definition group |
+| DexToolBench worse than the released model | Forgetting of the static skill | Sampling mix or lr |
+
+Two things limit the amount of trial and error:
+- The project question is whether velocity-conditioned goals help compared with the baseline, evaluated the same way.
+  This needs a reasonable, stable setting, not an optimal one.
+- Success criteria should be fixed before the main run (waypoint success on a held-out trajectory set at the final
+  level, and no DexToolBench drop compared with the released model), so that runs are compared on the same footing.
