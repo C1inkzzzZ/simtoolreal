@@ -975,3 +975,22 @@ Isaac Gym: widened checkpoint, new observations, phases, waypoint passing, curri
 sbatch --export=ALL,TASK=trajectory,NAME=17_traj_smoke2,CKPT=runs/31_vel_ft_v2/nn/last_31_vel_ft_v2_ep_3500_rew__10311.79_.pth \
     finetune_velocity/slurm/2_smoke_mig.sbatch
 ```
+
+**Smoke test 2 results (`17_traj_smoke2`, job 24298309, 150 epochs, level 0).** Both fixes work as intended.
+
+| | smoke 1 | smoke 2 |
+|---|---|---|
+| passes by "reached" | 0.98–1.00 | 0.44–0.57 (the rest are crossings) |
+| steps on moving waypoints | 0.05–0.08 | 0.16–0.19 |
+| chained share of started blocks | – | 0.24 → 0.47 (rises as blocks reach their end stop) |
+| static success | 0.91–0.95 | 0.90–0.95 |
+| abandon rate | 0–0.02 | 0–0.01 |
+| head / goal speed (m/s) | 0.20–0.23 / 0.22–0.23 | 0.16–0.18 / 0.20–0.22 |
+
+- Waypoint success is about 0.40 (q_pos 0.67, q_v 0.49), and the curriculum stays at level 0 (1713/4181 < 0.5).
+  Velocity tracking is the weak part: |dv|/|v_g| ≈ 0.84, v_par ≈ 0.87, v_perp ≈ 0.55, lateral offset only about
+  1.1 cm. So the head stays on the path but its velocity direction wobbles. The goal now really moves on only when
+  the tool gets there, so the head lags the goal speed by about 20%. This is what the main run has to learn; 150
+  epochs are not enough to judge learning trends.
+- About 23–32% of sampled blocks are infeasible even at level 0 (these fall back to plain static goals, so the
+  effective motion-block share is about 0.6 × 0.72 ≈ 0.43). This is a cost, not a bug; if needed, raise `tries`.
