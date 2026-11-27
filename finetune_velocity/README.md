@@ -8,6 +8,12 @@ goal) help force-sensitive tool tasks?**
 This step covers training only: fine-tuning the released Isaac Gym policy so that it passes through a given pose at a
 given velocity.
 
+> **Current status (branch `trajectory-goals`):** v1 and v2 (sections 1–13) used single lead-in + strike goals. Their
+> goal sequences turned out to be dynamically inconsistent (section 13), so the current version, **v3**, uses smooth
+> random trajectories with a velocity at every waypoint: design in section 14, environment in section 15, smoke tests
+> and fixes in section 16, settings guide in section 17, start-model choice in section 18. **Section 19 summarizes the
+> v3 main run and the evaluation plan; start there.**
+
 ---
 
 ## 1. Approach
@@ -1062,3 +1068,57 @@ blue_brush sweep_right 68.1 → 94.3; drops: flat_spatula flip_over 77.8 → 45.
   inputs and the faster arm, and the trajectory smoke tests from it kept static success at 0.90–0.95. The lineage of
   the final model is therefore released → v2 (velocity fine-tune, 3500 epochs) → trajectory fine-tune; a run from the
   released model can be added later as an ablation.
+
+## 19. v3 main run (`40_traj_v1`): settings, status and evaluation plan
+
+**Status:** submitted on the full A100 partition, waiting in the queue.
+
+**Settings**
+
+| | Value |
+|---|---|
+| Start model | v2 final checkpoint (`31_vel_ft_v2`, epoch 3500); section 18 explains the choice |
+| Inputs | widened from 149/173 to 164/189 (policy/critic) with zero weights: `goal_lookahead` (15) and `traj_progress` (1, critic only) |
+| Scale | 24576 envs, 3500 epochs, checkpoint every 250 epochs, 8 h limit |
+| Optimizer | actor lr 5e-5, critic-only warmup for the first 20 epochs |
+| Goal mix | 40% official static blocks; 60% motion blocks (set pose → moving waypoints 3 cm apart → end stop); after an end stop, 75% of blocks chain straight into the next one |
+| Trajectories | Bezier bends and wrist-like arcs, continuous tangents, speed profile with an acceleration limit of 3 m/s²; the curriculum widens them from straight and slow (level 0) to up to 6 segments, 90° bends, 180° arcs, 150° rotation, 0.6 m/s (level 1) |
+| Waypoint passing | advance on crossing the waypoint's normal plane or within 1.5 cm; reward B × q_pos × q_v at each pass; success = position within epsKp (6 → 1 cm) and velocity error < epsV (60% → 15%) of the goal speed |
+| Curriculum | level step 0.05 when moving-waypoint success ≥ 0.5 (down below 0.2), only while static success ≥ 0.5; arm speed ×1.5 → ×6 |
+| Full config | `finetune_velocity/trajectory.yaml` |
+
+**What we will check in the training logs:** whether the curriculum level rises; waypoint success, q_v and v_perp
+(velocity tracking was the weak part in the smoke tests); static success staying above about 0.8 (no forgetting);
+the share of steps on moving waypoints (expected about 25–30% at level 0, rising with the level). Section 17 lists
+which setting to look at for which symptom.
+
+**Evaluation plan (being worked out)**
+- DexToolBench only measures pose tracking. It checks that nothing was forgotten, but it cannot answer the project
+  question. Free-space trajectory tracking is also only a means: tracking a velocity well does not by itself mean
+  applying force well.
+- The main evaluation should be **contact tasks with measurable physical outcomes**, because a goal velocity is our
+  indirect way of controlling force:
+  - impact (nailing, striking an object): the impulse delivered depends on the head speed at contact. Measure nail
+    depth per strike, or how far a struck object slides;
+  - motion against resistance (sweeping, pushing, scraping): keeping the goal speed requires producing enough force,
+    while a pose-only policy tends to slow down or stall. Measure how much is swept in, and whether the tool stalls;
+  - quasi-static pressing (wiping with pressure) as a control: force there mostly comes from how far the goal is below
+    the surface, so we expect little difference.
+- The most direct metric is **controllability**: command several strike speeds and check that the outcome (nail depth,
+  slide distance) changes monotonically and reliably with them. A pose-only policy cannot do that on command.
+- Free-space tracking on fixed held-out trajectories stays as a diagnostic: if the contact tasks fail, it separates
+  "cannot track the velocity" from "tracks it, but contact disturbs it".
+- Leo's plate / nail / sweep tasks match this plan. If our policy can be evaluated in his environment, we would use
+  them, which also allows a direct comparison with his method. Open questions: how the tasks and success criteria are
+  defined, and whether an Isaac Gym SimToolReal policy (KUKA + Sharpa hand, 164-dim input) can be run there or the
+  tasks need to be rebuilt in Isaac Gym.
+
+**Known risk:** the training contains no contact with external objects; the policy only learns to move the tool at a
+velocity in free space. Impact tasks will probably benefit, since the speed just before contact sets the impulse.
+Tasks with sustained resistance may not: the policy has never felt resistance and may slow down. If the evaluation
+shows this, the next step is to add resisting contact objects to training.
+
+**Deferred: pose-only control run.** If v3 beats the released model on the contact tasks, we will run the same
+trajectory training with the velocity inputs zeroed and the velocity term removed from the pass reward (a pose-only
+policy given the same training). Only that comparison shows whether the gain comes from the velocity information or
+just from training on continuous motion. If v3 shows no gain, this run is not needed, so it waits for the v3 results.
