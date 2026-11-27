@@ -708,3 +708,40 @@ cone 45°, speed 0.165–0.375 m/s and arm ×1.95.
    driven mostly by the size of the error and gives little guidance toward approaching along the line.
 6. **More training alone will not fix this**: at this pace, completing all 20 curriculum levels is not realistic. The
    design needs to target lateral alignment instead (section 13, to be decided).
+
+---
+
+## 13. Diagnosis before v3: where does the lateral offset come from?
+
+**Question**: in v2 the head is about 1.7 cm off the strike line at the attempt, which explains almost all of the
+direction error (section 12). There are two candidate changes for v3:
+- **A**: tighten the lead-in tolerance from 3 cm to 1.5 cm;
+- **B**: add shaping for moving along the line during the strike stage.
+
+A alone is enough only if **the lateral offset at the attempt is mostly inherited from the moment the lead-in is
+reached**.
+- Why this is plausible: the lead-in only requires 3 cm and no hold. The policy arrives from the previous goal,
+  carrying sideways velocity unrelated to d, and then has only 12 cm of run-up.
+- But the offset could also arise during the run-up, e.g. from tool rotation, or from overshooting after passing
+  through the lead-in. Then A would not help much, and B is needed.
+
+**New diagnostics**, measured at the step the lead-in is reached, relative to the strike line (through the head center
+at the strike pose, along d):
+
+| Metric | Meaning |
+|---|---|
+| `vel/lateral_at_leadin` | Head distance from the strike line |
+| `vel/along_at_leadin` | Offset along d (ideally about −12 cm) |
+| `vel/v_par_rel_at_leadin` / `vel/v_perp_rel_at_leadin` | Velocity along / perpendicular to d, divided by \|v_g\| |
+
+**How to decide**: run a MIG smoke test from the v2 final policy, with unchanged training settings and the curriculum
+starting at level 0.10.
+- **Lateral offset at the attempt ≲ at the lead-in**: the offset is inherited, so v3 uses A.
+- **Clearly larger at the attempt**: the offset arises during the run-up, so v3 uses B (or A+B).
+- Also look at the perpendicular velocity at the lead-in: if it is large, the policy is cutting through the lead-in at
+  an angle.
+
+```bash
+sbatch --export=ALL,NAME=15_vel_smoke_diag,CKPT=runs/31_vel_ft_v2/nn/last_31_vel_ft_v2_ep_3500_rew__10311.79_.pth,EXTRA=task.env.velocity.curriculum.initLevel=0.1 \
+    finetune_velocity/slurm/2_smoke_mig.sbatch
+```

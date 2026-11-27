@@ -86,6 +86,11 @@ ACC_NAMES = [
     "sum_v_par_rel",  # (v_head . d) / |v_g| at the attempt
     "sum_v_perp_rel",  # |v_head - (v_head . d) d| / |v_g| at the attempt (the direction part of the error)
     "dense_rew",  # dense velocity reward paid (sum over steps)
+    # At the moment the lead-in is reached, relative to the strike line (through the strike head center along d):
+    "sum_lead_lateral",  # m, head distance from the line
+    "sum_lead_along",  # m, head offset along d (about -leadIn)
+    "sum_lead_v_par_rel",  # (v_head . d) / |v_g|
+    "sum_lead_v_perp_rel",  # |v_head - (v_head . d) d| / |v_g|
 ]
 ACC = {k: i for i, k in enumerate(ACC_NAMES)}
 
@@ -542,6 +547,14 @@ class SimToolRealVelocity(SimToolReal):
         lateral = (err - along.unsqueeze(-1) * d_hat).norm(dim=-1)
         v_par = (self.head_vel * d_hat).sum(-1)
         v_perp = (self.head_vel - v_par.unsqueeze(-1) * d_hat).norm(dim=-1)
+        # Same quantities at the lead-in, measured against the strike line (the strike pose is pending there).
+        lf = lead_reached.float()
+        strike_head = self.pending_strike_pose[:, 0:3] + quat_rotate_xyzw(
+            self.pending_strike_pose[:, 3:7], self.head_offset
+        )
+        err_l = self.head_pos - strike_head
+        along_l = (err_l * d_hat).sum(-1)
+        lateral_l = (err_l - along_l.unsqueeze(-1) * d_hat).norm(dim=-1)
         vel_steps = is_lead | is_strike
         vals = torch.stack(
             [
@@ -576,6 +589,10 @@ class SimToolRealVelocity(SimToolReal):
                 (v_par / spd * af).sum(),
                 (v_perp / spd * af).sum(),
                 dense_rew.sum(),
+                (lateral_l * lf).sum(),
+                (along_l * lf).sum(),
+                (v_par / spd * lf).sum(),
+                (v_perp / spd * lf).sum(),
             ]
         )
         a += vals
@@ -620,6 +637,10 @@ class SimToolRealVelocity(SimToolReal):
                 "vel/v_par_rel": g["sum_v_par_rel"] / n_att,
                 "vel/v_perp_rel": g["sum_v_perp_rel"] / n_att,
                 "bonus/dense_per_strike_step": g["dense_rew"] / max(g["steps_strike"], 1.0),
+                "vel/lateral_at_leadin": g["sum_lead_lateral"] / max(g["leadin_reached"], 1.0),
+                "vel/along_at_leadin": g["sum_lead_along"] / max(g["leadin_reached"], 1.0),
+                "vel/v_par_rel_at_leadin": g["sum_lead_v_par_rel"] / max(g["leadin_reached"], 1.0),
+                "vel/v_perp_rel_at_leadin": g["sum_lead_v_perp_rel"] / max(g["leadin_reached"], 1.0),
                 "vel/head_speed_on_vel_goals": g["sum_head_speed_vel"] / max(g["steps_leadin"] + g["steps_strike"], 1.0),
                 "static/success_rate": g["static_success"] / max(n_static_end, 1.0),
                 "static/successes": g["static_success"],
@@ -654,7 +675,9 @@ class SimToolRealVelocity(SimToolReal):
                     f"infeasible {st['vel/infeasible_frac']:.2f} | fd-analytic {st['vel/fd_vs_analytic_rel']:.2f} | "
                     f"v_par {st['vel/v_par_rel']:.2f} v_perp {st['vel/v_perp_rel']:.2f} "
                     f"lateral {st['vel/lateral_at_attempt'] * 100:.1f} cm along {st['vel/along_at_attempt'] * 100:.1f} cm | "
-                    f"dense/step {st['bonus/dense_per_strike_step']:.2f}"
+                    f"dense/step {st['bonus/dense_per_strike_step']:.2f} | at lead-in: "
+                    f"lateral {st['vel/lateral_at_leadin'] * 100:.1f} cm along {st['vel/along_at_leadin'] * 100:.1f} cm "
+                    f"v_par {st['vel/v_par_rel_at_leadin']:.2f} v_perp {st['vel/v_perp_rel_at_leadin']:.2f}"
                 )
         self.extras.update(self._vel_stats)
 

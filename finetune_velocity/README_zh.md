@@ -515,3 +515,33 @@ sbatch finetune_velocity/slurm/4_train_v2_a100.sbatch
 4. **方向误差的来源已经基本确定**：attempt 时工具头侧向偏离 strike 直线约 1.7 cm，沿 d 方向还差约 3.9 cm。如果策略此时朝目标中心收拢，方向会偏 atan(1.7 / 3.9) ≈ 23.6°；按 speed_ratio 1.13 计算，v_perp ≈ 1.13 × sin(23.6°) ≈ 0.45 |v_g|，与观测到的 0.43–0.44 几乎完全吻合。也就是说，**策略没有沿着 strike 直线运动，而是在最后几厘米朝目标点修正侧向偏差**，这个修正本身就是方向误差。
 5. **稠密奖励的作用有限**：它让速度大小更准，但每步的 q_v 主要由误差大小决定，对"沿直线接近"的引导很弱。
 6. 按目前的速度，课程走完 20 级不现实；继续堆训练时长意义不大，需要针对侧向对准改设计（第 13 节，待定）。
+
+---
+
+## 13. v3 之前的诊断：侧向偏差是从哪里来的
+
+**问题**：v2 中 attempt 时工具头偏离 strike 直线约 1.7 cm，这几乎完全解释了方向误差（第 12 节）。v3 的候选改动有两个：
+- **A**：把 lead-in 的到达容差从 3 cm 收紧到 1.5 cm；
+- **B**：在 strike 阶段加沿直线运动的 shaping。
+
+只用 A 的前提是：**attempt 时的侧向偏差主要是从到达 lead-in 那一刻继承来的**。
+- 支持这个前提的理由：lead-in 只要求 3 cm、不要求停留，策略又是从上一个目标赶过来、带着与 d 无关的侧向速度进入 lead-in 的，然后只有 12 cm 的助跑距离。
+- 但偏差也可能是助跑途中才产生的，比如工具转动、冲过 lead-in 后过冲。这种情况下 A 帮助不大，需要 B。
+
+**新增诊断量**（在到达 lead-in 的那一步，相对于 strike 直线测量；这条直线过 strike 时工具头的中心，方向为 d）：
+
+| 指标 | 含义 |
+|---|---|
+| `vel/lateral_at_leadin` | 工具头离 strike 直线的距离 |
+| `vel/along_at_leadin` | 沿 d 方向的偏移（理想值约 −12 cm） |
+| `vel/v_par_rel_at_leadin` / `vel/v_perp_rel_at_leadin` | 速度沿 d / 垂直于 d 的分量，除以 \|v_g\| |
+
+**判断方式**：用 v2 的最终策略在 MIG 上跑一次 smoke，训练设置不变，课程从 level 0.10 开始。
+- **attempt 时的侧向偏差 ≲ 到达 lead-in 时的**：偏差是继承来的，v3 用 A。
+- **attempt 时的侧向偏差明显更大**：偏差在助跑途中产生，v3 用 B（或 A+B）。
+- 同时参考到达 lead-in 时的垂直速度：如果它很大，说明策略是斜着冲过 lead-in 的。
+
+```bash
+sbatch --export=ALL,NAME=15_vel_smoke_diag,CKPT=runs/31_vel_ft_v2/nn/last_31_vel_ft_v2_ep_3500_rew__10311.79_.pth,EXTRA=task.env.velocity.curriculum.initLevel=0.1 \
+    finetune_velocity/slurm/2_smoke_mig.sbatch
+```
