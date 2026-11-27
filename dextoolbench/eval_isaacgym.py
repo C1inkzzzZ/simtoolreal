@@ -289,8 +289,9 @@ class EvalRunner:
 
         # Load policy
         self.env.set_env_state(torch.load(checkpoint_path)[0]["env_state"])
+        # Policy input size from the env (140 for the released policy, more for fine-tuned ones with extra obs terms)
         self.policy = RlPlayer(
-            140, self.n_act, config_path, checkpoint_path, self.device, env.num_envs
+            env.num_obs, self.n_act, config_path, checkpoint_path, self.device, env.num_envs
         )
 
         self.output_dir = output_dir
