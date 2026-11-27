@@ -1034,3 +1034,31 @@ Two things limit the amount of trial and error:
   This needs a reasonable, stable setting, not an optimal one.
 - Success criteria should be fixed before the main run (waypoint success on a held-out trajectory set at the final
   level, and no DexToolBench drop compared with the released model), so that runs are compared on the same footing.
+
+## 18. DexToolBench: v2 vs the released model (choosing the start model for trajectory training)
+
+24 object/task pairs × 10 episodes each, average share of goals reached. The released model runs with its own config;
+v2 runs at a fixed curriculum level of 0.10 (arm speed ×1.95, its operating point at the end of training).
+
+| Category | released | v2 |
+|---|---|---|
+| hammer | 98.7% | 100.0% |
+| spatula | 93.6% | 86.3% |
+| eraser | 88.4% | 100.0% |
+| screwdriver | 89.2% | 94.0% |
+| marker | 100.0% | 95.6% |
+| brush | 84.4% | 96.4% |
+| **overall** | **92.4%** | **95.4%** |
+
+Largest per-pair changes (released → v2): flat_eraser wipe_c 53.4 → 100, blue_brush sweep_forward 73.8 → 92.4,
+blue_brush sweep_right 68.1 → 94.3; drops: flat_spatula flip_over 77.8 → 45.3, staples_marker draw_smile
+100 → 82.2.
+
+- No sign of systematic forgetting: overall +3 points, four categories up and two down. With 10 episodes per pair,
+  single pairs are noisy, so the two drops are not clearly real.
+- Caveat: v2 ran at arm speed ×1.95 and the released model at ×1, so this compares each model at its own operating
+  point, not the same policy under the same conditions.
+- Decision: trajectory training starts from v2's final checkpoint. It shows no forgetting, already has the velocity
+  inputs and the faster arm, and the trajectory smoke tests from it kept static success at 0.90–0.95. The lineage of
+  the final model is therefore released → v2 (velocity fine-tune, 3500 epochs) → trajectory fine-tune; a run from the
+  released model can be added later as an ablation.
