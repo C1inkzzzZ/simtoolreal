@@ -642,3 +642,60 @@ sbatch --export=ALL,NAME=14_vel_smoke_v2,CKPT=runs/20_vel_ft_v1/nn/last_20_vel_f
 # If it looks right:
 sbatch finetune_velocity/slurm/4_train_v2_a100.sbatch
 ```
+
+---
+
+## 12. Main run v2 results (`31_vel_ft_v2`)
+
+Setup: full A100, 24576 envs, from the v1 final checkpoint, 3500 epochs (about 1.4 billion frames), 4 h 21 min, ended
+normally.
+- Average 97.6k fps.
+- Peak GPU memory 26.4 GB of 40 GB; the linear extrapolation before training estimated about 30 GB.
+- Final checkpoint: `runs/31_vel_ft_v2/nn/last_31_vel_ft_v2_ep_3500_rew__10311.79_.pth`.
+
+**Curriculum**: 1736 blocks in total (each about 3000–3500 finished velocity goals), two level-ups, no level-down:
+
+| When | Block success | Event |
+|---|---|---|
+| Block 1 | 1571/3048 = 0.515 | Up to level 0.05 (skill inherited from v1, plus the dense reward) |
+| Blocks 51–1201 | 0.41–0.49, mostly 0.45–0.47 | Stays at 0.05 |
+| Around block 1220 | 1763/3511 = 0.502 | Up to level 0.10 |
+| Blocks 1251–1736 | 0.44–0.48 | Stays at 0.10 until the end |
+
+**Metrics at the end of training.** At level 0.10 the parameters are σ ≈ 0.92, epsVFrac ≈ 0.555, epsKp ≈ 5.5 cm,
+cone 45°, speed 0.165–0.375 m/s and arm ×1.95.
+
+| Metric | End of v1 (level 0) | End of v2 (level 0.10) |
+|---|---|---|
+| Velocity success | 0.45 | 0.45–0.48 |
+| q_v | 0.53 | 0.53–0.54 |
+| \|dv\|/\|v_g\| | 0.70 | 0.64–0.66 |
+| speed_ratio | 1.2 | 1.11–1.15 |
+| cos_dir | 0.83 | 0.84 |
+| v_par_rel / v_perp_rel | — | 0.95–0.99 / 0.43–0.44 |
+| lateral / along (at the attempt) | — | 1.7 cm / −3.9 to −4.0 cm |
+| head_err_at_attempt | 5.0 cm | 4.5 cm |
+| Static success | 0.89 | **0.91** |
+| dense/step | — | 1.28–1.29 |
+
+**Conclusions**
+
+1. **No forgetting; static skill slightly better**: static success 0.90–0.92, above v1's 0.89.
+2. **Speed magnitude is essentially learned**: the component along d is v_par ≈ 0.97 |v_g|, and the speed ratio fell
+   from 1.2 to about 1.13.
+3. **The direction error barely improved and is the main bottleneck**:
+   - cos went from 0.83 to only 0.84, and the perpendicular component v_perp is about 0.44 |v_g| (about 24°).
+   - At level 0.10 the success threshold is |dv| < 0.555 |v_g|, and the perpendicular component alone uses up most of
+     that margin. Success is therefore stuck at about 0.46.
+   - The two level-ups came mostly from block-to-block noise: both blocks were only at 0.50–0.52.
+4. **The source of the direction error is now essentially pinned down**:
+   - At the attempt the head is about 1.7 cm off the strike line laterally and still about 3.9 cm short along d.
+   - If the policy is converging on the goal point at that moment, its direction is off by
+     atan(1.7 / 3.9) ≈ 23.6°. With speed_ratio 1.13 this gives v_perp ≈ 1.13 × sin(23.6°) ≈ 0.45 |v_g|, almost
+     exactly the observed 0.43–0.44.
+   - In other words, **the policy does not move along the strike line; in the last few centimeters it corrects its
+     lateral offset toward the goal point, and that correction is the direction error.**
+5. **The dense reward helped only a little**: it made the speed magnitude more accurate, but the per-step q_v is
+   driven mostly by the size of the error and gives little guidance toward approaching along the line.
+6. **More training alone will not fix this**: at this pace, completing all 20 curriculum levels is not realistic. The
+   design needs to target lateral alignment instead (section 13, to be decided).
