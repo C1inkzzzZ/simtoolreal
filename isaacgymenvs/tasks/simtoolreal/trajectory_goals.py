@@ -15,7 +15,8 @@ plateau in between), capped by an acceleration limit. Every waypoint's goal velo
 speed there, so consecutive goals are dynamically consistent by construction (the v1/v2 diagnosis: the policy reached
 the lead-in moving backwards and sideways because the goal sequence was not).
 
-Geometry defaults are calibrated against DexToolBench's task trajectories (finetune_velocity/README section 14).
+Geometry ranges are set so that DexToolBench's task trajectories are covered with room to spare (DexToolBench is a
+coverage floor, not the target; finetune_velocity/README section 14).
 Conventions as in the env: quaternions xyzw, tool frame origin at the handle center with +x toward the head.
 """
 
@@ -46,9 +47,9 @@ class TrajParams:
     cone_deg: float  # start direction within this angle of the head's face axis (as in v1/v2)
     p_arc: float = 0.0  # probability that a segment is an arc (rigid rotation about a pivot)
     arc_max_deg: float = 0.0  # arc segments: max swept angle
-    arc_radius: Tuple[float, float] = (0.10, 0.30)  # m, pivot-to-head distance of arc segments
+    arc_radius: Tuple[float, float] = (0.08, 0.30)  # m, pivot-to-head distance of arc segments
     arc_pivot_on_handle: float = 0.7  # probability that the arc pivot lies on the handle line (wrist-like swing)
-    seg_len: Tuple[float, float] = (0.06, 0.25)  # m, chord (bend) or arc length of each segment
+    seg_len: Tuple[float, float] = (0.06, 0.30)  # m, chord (bend) or arc length of each segment
     peak_frac: Tuple[float, float] = (0.5, 1.0)
     ramp_up: Tuple[float, float] = (0.15, 0.6)  # fraction of the chunk's path used to speed up from rest
     ramp_down: Tuple[float, float] = (0.15, 0.4)  # fraction used to slow down to rest (short = strike-like)

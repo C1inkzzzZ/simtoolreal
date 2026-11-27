@@ -778,3 +778,100 @@ The other metrics are close to the end of v2: velocity success 0.24–0.51, cos 
    inaccurate start position.
    - The original option A does not address it.
    - B (shaping for moving along the line) would only address it indirectly.
+
+---
+
+## 14. Next design: smooth trajectory goals with velocities (in progress, branch `trajectory-goals`)
+
+**Why the design changes**: the diagnosis in section 13 showed that the direction error comes from a **dynamically
+inconsistent goal sequence**: the policy entered the run-up moving backwards and sideways. Another fix would be to
+make the lead-in a static goal (stop, then strike). But that only trains stop-then-strike single impacts and does
+nothing for long-horizon tasks such as wiping, sweeping and chained motions, which runs against the project's aim of
+general velocity-conditioned tool use. (Leo has been asked for his view.)
+
+### 14.1 Decisions made
+
+| Decision | What | Why |
+|---|---|---|
+| Goal form | A sequence of waypoints, each with a pose and a head velocity. Zero-velocity waypoints are official static goals (1.5 cm, hold 10 steps) | Static goals, single strikes, sweeps and wipes are all special cases of one framework. The previous waypoint is always behind the current one, with its velocity pointing at it, so there is no more backing into the run-up |
+| Goal sequence | Pick up the tool, then a series of blocks. **40%** are static blocks (an official delta goal). A motion block is: set pose (static) → moving waypoints → end stop (static) | Keeps the official "reach and hold" structure, to prevent forgetting |
+| Advancing | **Event-driven**: a waypoint counts as passed when it is reached (keypoint distance ≤ eps_kp) **or crossed** (its normal plane). Straying more than about 15 cm abandons the block and jumps to its end stop | Consistent with SimToolReal. With the "crossed" condition, a near miss does not force the policy to turn back |
+| Lookahead | The **next** waypoint is added to the observation (relative keypoints + velocity, 15 dims, zero-initialized) | Waypoints switch every few steps and observations are delayed by up to 3 steps, so the policy needs to see the next waypoint in advance |
+| Reward | Static waypoints: the official reward. Moving waypoints: B × q_pos × q_v when passed, about 1000 in total per block. **The dense velocity reward from v2 is dropped** | Per-waypoint rewards are already dense; the total does not depend on block length |
+| Training | **Fine-tune** SimToolReal, not from scratch | Grasping, holding and robustness are already learned; compute and time are limited; the comparison is cleaner |
+| Initial model | **Pending** the DexToolBench evaluation of v2 | v2 if it shows no forgetting, otherwise the released model |
+
+### 14.2 Trajectory sampler (`isaacgymenvs/tasks/simtoolreal/trajectory_goals.py`, pure torch)
+
+- **The path is defined at the head center**, built from 1..n segments joined with continuous tangents. Two kinds of
+  segment:
+  - **bend segments**: cubic Bezier curves, with the orientation slerped toward a random rotation;
+  - **arc segments**: rigid rotation about a wrist-like pivot. The head sweeps a circular arc, so the motion is
+    rotation-dominated (hammer swings, spatula flips).
+- **Speed profile**: a smooth quintic ramp up from rest, a plateau, and a smooth ramp back down to rest.
+  - The ramp fractions are random; short ramp-downs look like strikes.
+  - The peak speed is capped by the acceleration limit (3 m/s²).
+  - Each waypoint's goal velocity is the path tangent times the speed there, so the sequence is dynamically
+    consistent by construction.
+- Waypoints are about 3 cm apart (one every ~4 control steps at 0.5 m/s). The feasibility check is the same as in
+  v1/v2, applied along the whole path.
+- Curriculum (level 0 → 1):
+
+  | Parameter | Level 0 | Level 1 |
+  |---|---|---|
+  | Peak speed limit | 0.35 m/s | 0.6 m/s |
+  | Bend | 0° | 90° |
+  | Rotation per segment | 0° | 150° |
+  | Arc share (max swept angle) | 0 (0°) | 40% (180°) |
+  | Segments per block | 1 | 1–6 |
+  | Start-direction cone | 30° | 180° |
+
+  25% of blocks are downward strikes.
+- CPU tests: `finetune_velocity/tests/test_trajectories.py`. They check:
+  - speed limits, rest at the end, the acceleration limit;
+  - waypoint spacing, and velocity along the tangent;
+  - pose consistency and feasibility;
+  - that level 0 is straight and does not rotate.
+
+### 14.3 Coverage check against DexToolBench (`finetune_velocity/tools/compare_dextoolbench.py`)
+
+DexToolBench trajectories have poses but no timestamps, so only the geometry can be compared. **Principle:
+DexToolBench is a floor for coverage, not the training target.** The sampler's ranges should contain it with room to
+spare, so that the policy does not work only on these 24 tasks.
+
+| Metric | DexToolBench (24 tasks) | Sampler, level 1 |
+|---|---|---|
+| Orientation change per cm of head travel, median / 90th pct | 3.4 / 15.9 °/cm | 3.8 / 7.0 °/cm |
+| Turning angle per 3 cm, median / 90th pct | 17° / 129° | 12° / 34° |
+| Head path / handle path, median / 90th pct | 1.03 / 1.52 | 1.08 / 1.76 |
+| Length of one continuous motion, median / max | 0.79 / 1.41 m | 0.29 / 1.49 m |
+
+Figures: `finetune_velocity/figures/geometry_vs_dextoolbench.png`, and sample blocks in
+`finetune_velocity/figures/trajectory_chunks.png` (`finetune_velocity/tools/plot_trajectories.py`).
+
+**Known gaps and limitations**
+
+1. **Turns sharper than 90° (reversals)**: physically these require a stop, so they are designed as
+   "stop → next block" rather than within one block. This is also why a single block is shorter than a whole
+   DexToolBench task.
+2. **Rotation in place** (screwdriver spin; it accounts for most of the 15.9 °/cm at the 90th percentile): the head's
+   linear velocity is about zero, which the "head linear velocity" interface cannot express. This needs an
+   angular-velocity goal later.
+3. **Speed magnitude** has no real data to calibrate against; it uses Leo's 0.3–0.6 m/s. At level 1 the acceleration
+   limit and path length bring the mean peak to about 0.37 m/s, with the 90th percentile at about 0.5 m/s.
+4. The tool never touches anything during training; whether velocity conditioning helps apply force can only be shown
+   by evaluating contact tasks.
+5. Calibrating the geometry on DexToolBench and also evaluating static tasks on it is a mild leak. Conclusions about
+   generalization should rest on tasks that were not used for calibration (e.g. Leo's plate / nail / sweep).
+
+### 14.4 Next
+
+1. Integrate into the env:
+   - a waypoint queue;
+   - event-driven advancing, including the "crossed" check and the abandon rule;
+   - the reward, the lookahead observation and phase information for the critic;
+   - diagnostics and the curriculum.
+2. Make the widening and launch scripts support any old observation size (the start may be v2 at 149 dims or the
+   released model at 140).
+3. Decide the initial model, then MIG smoke test → A100 main run.
+4. Later: a separate test trajectory set (four typical motion types, plus stress tests beyond the training ranges).
