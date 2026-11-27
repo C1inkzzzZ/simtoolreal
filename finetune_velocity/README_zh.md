@@ -619,3 +619,42 @@ DexToolBench 的轨迹只有位姿、没有时间戳，所以只能比较几何�
 2. 让扩展脚本和启动脚本支持任意的旧观测维度（起点可能是 v2 的 149 维，也可能是官方的 140 维）。
 3. 定下起点模型，然后 MIG smoke → A100 正式训练。
 4. 稍后再做：独立的测试轨迹集（四类典型运动，加上超出训练范围的压力测试）。
+
+---
+
+## 15. 轨迹目标的环境实现（`SimToolRealTrajectory`）
+
+| 文件 | 内容 |
+|---|---|
+| `isaacgymenvs/tasks/simtoolreal/trajectory_env.py` | 新任务，继承 `SimToolRealVelocity`（沿用工具头速度、速度观测、臂速倍数、课程类和观测钩子），替换目标逻辑 |
+| `isaacgymenvs/tasks/simtoolreal/trajectory_goals.py` | 采样器（第 14 节），以及判定"经过"路点的纯函数 `waypoint_pass`（有 CPU 测试） |
+| `finetune_velocity/trajectory.yaml` | 全部参数和课程范围 |
+| `finetune_velocity/launch_from_pretrained.py` | 新增 `--task trajectory`；权重扩展改为通用：按任务需要的输入维度，自动补齐 checkpoint 缺少的部分（官方 140/162 → 164/189，或 v2 的 149/173 → 164/189） |
+| `finetune_velocity/slurm/6_train_traj_a100.sbatch` | 正式训练；smoke 用 `2_smoke_mig.sbatch` 加 `TASK=trajectory` |
+
+**目标的阶段**（`phase`）：PLAIN（静态块）、SET（设定位姿，静态）、MOVE（运动路点）、END（终点停点，静态）。
+- PLAIN、SET、END 都用官方的停留规则，只有这三种会计入 `successes`，这样官方"每个 episode 最多 50 个目标"的含义保持不变。
+- MOVE 路点"经过"（到达或越过）时，奖励为 B × q_pos × q_v，其中 B = 1000 / 该块的运动路点数；偏离超过 15 cm 就放弃这一块，直接跳到 END。
+- 每次目标前进，每个目标的计时器（600 步）都重新开始。
+
+**新增观测**
+- `goal_lookahead`（15 维，策略和 critic 都有）：下一个路点的 keypoint 相对工具当前 keypoint 的位置（12 维），加上下一个路点的速度除以 0.5 m/s（3 维）。在 SET 阶段，下一个路点是第一个运动路点；在静态目标上，就是当前目标本身。
+- `traj_progress`（1 维，只给 critic）：当前块剩余运动路点的比例。
+- `velocity_phase` 沿用 v2 的 2 维，现在含义是（0，是否在运动路点上）。
+
+**课程**：判定依据是运动路点的成功率，即位置在 eps_kp 内且速度误差 < eps_v × max(|v_g|, 0.1)，每块至少 4096 个样本；静态保护不变。
+
+**日志**：`[trajectory] step ...` 这一行，以及 TensorBoard 中的 `traj/*`，包括：
+- 路点成功率、到达比例、放弃率；
+- q_pos、q_v、v_par、v_perp、侧向偏差；
+- 工具头速度与目标速度；
+- 完成、失败的块数，不可行比例，运动步数占比。
+
+**运行**
+```bash
+# smoke（MIG）：从 v2 或官方模型开始都可以
+sbatch --export=ALL,TASK=trajectory,NAME=16_traj_smoke,CKPT=runs/31_vel_ft_v2/nn/last_31_vel_ft_v2_ep_3500_rew__10311.79_.pth \
+    finetune_velocity/slurm/2_smoke_mig.sbatch
+# 正式训练（A100），CKPT 取决于起点模型的决定
+sbatch --export=ALL,NAME=40_traj_v1,CKPT=<checkpoint> finetune_velocity/slurm/6_train_traj_a100.sbatch
+```

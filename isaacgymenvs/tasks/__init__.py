@@ -28,9 +28,11 @@
 
 from .simtoolreal.env import SimToolReal
 from .simtoolreal.velocity_env import SimToolRealVelocity
+from .simtoolreal.trajectory_env import SimToolRealTrajectory
 
 # Mappings from strings to environments
 isaacgym_task_map = {
     "SimToolReal": SimToolReal,
     "SimToolRealVelocity": SimToolRealVelocity,
+    "SimToolRealTrajectory": SimToolRealTrajectory,
 }

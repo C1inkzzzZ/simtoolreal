@@ -207,6 +207,23 @@ def test_expand_checkpoint_is_exact():
         assert torch.allclose(_critic_out(new[0]["assymetric_vf_nets"], state_new, block), c_old, atol=1e-5)
 
 
+def test_expand_from_velocity_finetune_sizes():
+    """Widening a v2 checkpoint (149 / 173 inputs) for the trajectory task (164 / 189) is exact too."""
+    ckpt = _fake_checkpoint(obs=149, state=173)
+    new, _ = ec.expand_checkpoint(ckpt, 15, 16)
+    ec.verify(ckpt[0], new[0], 15, 16)
+    g = torch.Generator().manual_seed(5)
+    obs = torch.randn(8, 149, generator=g)
+    state = torch.randn(8, 173, generator=g)
+    block = torch.randint(0, 6, (8,), generator=g)
+    a_old = _actor_out(ckpt[0]["model"], obs, block)
+    c_old = _critic_out(ckpt[0]["assymetric_vf_nets"], state, block)
+    obs_new = torch.cat([obs, torch.randn(8, 15, generator=g)], dim=-1)
+    state_new = torch.cat([state, torch.randn(8, 16, generator=g)], dim=-1)
+    assert torch.allclose(_actor_out(new[0]["model"], obs_new, block), a_old, atol=1e-5)
+    assert torch.allclose(_critic_out(new[0]["assymetric_vf_nets"], state_new, block), c_old, atol=1e-5)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

@@ -165,6 +165,7 @@ def sample_motion_chunks(
       set_quat (N, 4)   possibly turned so the head faces a downward start direction
       wp_pos (N, K, 3), wp_quat (N, K, 4)   tool-frame waypoint poses (K = k_max; entries past n_wp repeat the end)
       wp_vel (N, K, 3)  head velocity at each waypoint (0 at the end stop)
+      wp_tan (N, K, 3)  unit path tangent at each waypoint (defined even where the speed is 0)
       wp_head (N, K, 3) head center at each waypoint
       wp_s (N, K)       arc length from the set pose's head center
       n_wp (N,) long    number of valid waypoints; waypoint n_wp - 1 is the end stop
@@ -274,7 +275,7 @@ def sample_motion_chunks(
     wp_pos = wp_head - quat_rotate_xyzw(wp_quat, r_head.unsqueeze(1).expand(m, K, 3))
     end = (n_wp - 1).unsqueeze(1).expand(m, K)
     pad = ~valid
-    for x in (wp_pos, wp_quat, wp_head, wp_vel):
+    for x in (wp_pos, wp_quat, wp_head, wp_vel, tan):
         x[pad] = x[rows, end][pad]
     s_k = torch.where(valid, s_k, total.unsqueeze(1).expand(m, K))
 
@@ -297,6 +298,7 @@ def sample_motion_chunks(
         wp_pos=wp_pos[pick],
         wp_quat=wp_quat[pick],
         wp_vel=wp_vel[pick],
+        wp_tan=tan[pick],
         wp_head=wp_head[pick],
         wp_s=s_k[pick],
         n_wp=n_wp[pick],
@@ -304,3 +306,42 @@ def sample_motion_chunks(
         is_down=is_down[pick],
         n_arc=n_arc[pick],
     )
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Passing a moving waypoint (event-driven advance) and its reward terms
+# ----------------------------------------------------------------------------------------------------------------------
+@dataclass
+class PassParams:
+    eps_kp: float  # m, keypoint distance that counts as reaching the waypoint
+    sigma_pos: float  # m, q_pos = exp(-kp_dist / sigma_pos)
+    sigma_v: float  # q_v = exp(-|dv| / (sigma_v * max(|v_g|, v_floor)))
+    eps_v: float  # velocity success: |dv| < eps_v * max(|v_g|, v_floor)
+    v_floor: float = 0.1  # m/s, so that slow waypoints near the ends are not judged on a tiny |v_g|
+    abandon_dist: float = 0.15  # m, head farther than this from the waypoint's head center abandons the block
+
+
+def waypoint_pass(kp_dist: Tensor, head_pos: Tensor, head_vel: Tensor, wp_head: Tensor, wp_tan: Tensor,
+                  wp_vel: Tensor, p: PassParams):
+    """Per env (moving waypoint is the current goal). All (N,) except vectors (N, 3).
+
+    reached: keypoint distance <= eps_kp. crossed: the head is past the waypoint's normal plane (along the tangent).
+    passed = reached | crossed; abandon: head farther than abandon_dist from the waypoint (and not passed).
+    """
+    rel = head_pos - wp_head
+    along = (rel * wp_tan).sum(-1)
+    lateral = (rel - along.unsqueeze(-1) * wp_tan).norm(dim=-1)
+    reached = kp_dist <= p.eps_kp
+    crossed = along >= 0.0
+    passed = reached | crossed
+    abandon = (~passed) & (rel.norm(dim=-1) > p.abandon_dist)
+    speed_ref = wp_vel.norm(dim=-1).clamp(min=p.v_floor)
+    dv = (head_vel - wp_vel).norm(dim=-1)
+    q_pos = torch.exp(-kp_dist / p.sigma_pos)
+    q_v = torch.exp(-dv / (p.sigma_v * speed_ref))
+    success = reached & (dv < p.eps_v * speed_ref)
+    v_par = (head_vel * wp_tan).sum(-1)
+    v_perp = (head_vel - v_par.unsqueeze(-1) * wp_tan).norm(dim=-1)
+    return dict(reached=reached, crossed=crossed, passed=passed, abandon=abandon, q_pos=q_pos, q_v=q_v,
+                success=success, lateral=lateral, along=along, dv_rel=dv / speed_ref,
+                v_par_rel=v_par / speed_ref, v_perp_rel=v_perp / speed_ref)

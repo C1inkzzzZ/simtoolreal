@@ -875,3 +875,49 @@ Figures: `finetune_velocity/figures/geometry_vs_dextoolbench.png`, and sample bl
    released model at 140).
 3. Decide the initial model, then MIG smoke test → A100 main run.
 4. Later: a separate test trajectory set (four typical motion types, plus stress tests beyond the training ranges).
+
+---
+
+## 15. Environment implementation of trajectory goals (`SimToolRealTrajectory`)
+
+| File | Content |
+|---|---|
+| `isaacgymenvs/tasks/simtoolreal/trajectory_env.py` | New task. It subclasses `SimToolRealVelocity` (keeping head velocity, velocity obs, the arm-speed multiplier, the curriculum class and the obs hooks) and replaces the goal logic |
+| `isaacgymenvs/tasks/simtoolreal/trajectory_goals.py` | The sampler (section 14), plus `waypoint_pass`, a pure function that decides whether a waypoint is passed (CPU-tested) |
+| `finetune_velocity/trajectory.yaml` | All parameters and curriculum ranges |
+| `finetune_velocity/launch_from_pretrained.py` | New `--task trajectory`. Checkpoint widening is now generic: it adds whatever inputs the checkpoint lacks for the task (released 140/162 → 164/189, or v2's 149/173 → 164/189) |
+| `finetune_velocity/slurm/6_train_traj_a100.sbatch` | Main run. The smoke test is `2_smoke_mig.sbatch` with `TASK=trajectory` |
+
+**Goal phases** (`phase`): PLAIN (static block), SET (set pose, static), MOVE (moving waypoint), END (end stop,
+static).
+- PLAIN, SET and END use the official hold rule. Only these count toward `successes`, so the official "at most 50
+  goals per episode" keeps its meaning.
+- A MOVE waypoint that is passed (reached or crossed) pays B × q_pos × q_v, with B = 1000 / the block's number of
+  moving waypoints.
+- Straying more than 15 cm abandons the block and jumps to END.
+- The per-goal timer (600 steps) restarts whenever the goal advances.
+
+**New observations**
+- `goal_lookahead` (15 dims, policy and critic): the next waypoint's keypoints relative to the tool's current
+  keypoints (12), plus the next waypoint's velocity divided by 0.5 m/s (3). In SET, the next waypoint is the first
+  moving one; on a static goal it is the current goal itself.
+- `traj_progress` (1 dim, critic only): the fraction of the block's moving waypoints still ahead.
+- `velocity_phase` keeps v2's 2 dims, now meaning (0, on a moving waypoint).
+
+**Curriculum**: decided on moving-waypoint success: position within eps_kp and velocity error
+< eps_v × max(|v_g|, 0.1), at least 4096 samples per block. The static guard is unchanged.
+
+**Logs**: the `[trajectory] step ...` line, and `traj/*` in TensorBoard:
+- waypoint success rate, share reached, abandon rate;
+- q_pos, q_v, v_par, v_perp, lateral offset;
+- head speed vs goal speed;
+- blocks completed and failed, infeasible share, share of steps spent moving.
+
+**Running it**
+```bash
+# smoke test (MIG): starting from v2 or from the released model both work
+sbatch --export=ALL,TASK=trajectory,NAME=16_traj_smoke,CKPT=runs/31_vel_ft_v2/nn/last_31_vel_ft_v2_ep_3500_rew__10311.79_.pth \
+    finetune_velocity/slurm/2_smoke_mig.sbatch
+# main run (A100); CKPT depends on the initial-model decision
+sbatch --export=ALL,NAME=40_traj_v1,CKPT=<checkpoint> finetune_velocity/slurm/6_train_traj_a100.sbatch
+```

@@ -5,10 +5,13 @@ cluster run, and starts rl_games training. Only the weights are loaded by defaul
 schedule, epoch 0), which is what fine-tuning needs.
 
 --task static    the official task (sanity runs; what 00_ft_sanity used).
---task velocity  SimToolRealVelocity: pose + velocity goals (finetune_velocity/velocity.yaml, README_zh.md).
-                 Adds the goal_velocity obs (policy + critic) and velocity_phase (critic), widens the checkpoint with
-                 zero weights for them (expand_checkpoint.py; cached next to the source checkpoint), and by default
-                 trains only the critic for the first --critic-warmup epochs.
+--task velocity    SimToolRealVelocity: pose + velocity goals (finetune_velocity/velocity.yaml, README sections 3-13).
+                   Adds the goal_velocity obs (policy + critic) and velocity_phase (critic).
+--task trajectory  SimToolRealTrajectory: smooth trajectory goals (finetune_velocity/trajectory.yaml, README section 14).
+                   Additionally goal_lookahead (policy + critic) and traj_progress (critic).
+Both widen the checkpoint with zero weights for whatever obs terms it lacks (expand_checkpoint.py; cached next to the
+source checkpoint, so it works from the released model or from a velocity fine-tune), and by default train only the
+critic for the first --critic-warmup epochs.
 
 SAPG: the checkpoint has one learned row per exploration block (extra_params and sigma), 6 in total, so the run keeps
 6 blocks and only the block size (num_envs / 6) changes.
@@ -39,14 +42,20 @@ import expand_checkpoint  # noqa: E402
 
 NUM_SAPG_BLOCKS = 6  # fixed by the checkpoint
 HERE = os.path.dirname(os.path.abspath(__file__))
-VELOCITY_OBS = ["goal_velocity"]  # 9 dims, appended to obsList and stateList
-VELOCITY_STATE_ONLY = ["velocity_phase"]  # 2 dims, critic only
-NEW_OBS, NEW_STATE = 9, 11
+BASE_OBS, BASE_STATE = 140, 162  # released obsList / stateList
+EXTRA_SIZES = {"goal_velocity": 9, "velocity_phase": 2, "goal_lookahead": 15, "traj_progress": 1}
+# extra terms appended (in this order) to the released obsList / stateList
+TASKS = {
+    "velocity": dict(name="SimToolRealVelocity", obs=["goal_velocity"],
+                     state=["goal_velocity", "velocity_phase"]),
+    "trajectory": dict(name="SimToolRealTrajectory", obs=["goal_velocity", "goal_lookahead"],
+                       state=["goal_velocity", "velocity_phase", "goal_lookahead", "traj_progress"]),
+}
 
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--task", default="static", choices=["static", "velocity"])
+    p.add_argument("--task", default="static", choices=["static", "velocity", "trajectory"])
     p.add_argument("--config", default="pretrained_policy/config.yaml")
     p.add_argument("--checkpoint", default="pretrained_policy/model.pth",
                    help="released checkpoint (velocity: widened automatically, or pass an already widened one)")
@@ -64,40 +73,51 @@ def parse_args():
     return p.parse_args()
 
 
-def widened_checkpoint(src: str) -> str:
-    """Return a checkpoint whose input layers fit the velocity obs/state; create it once next to src."""
+def widened_checkpoint(src: str, target_obs: int, target_state: int) -> str:
+    """Return a checkpoint whose input layers fit target_obs / target_state; create it once next to src.
+
+    The new terms are always appended after the ones the checkpoint already reads (TASKS lists them in that order),
+    so the zero columns go at the end of the old inputs, before the SAPG extra-param columns.
+    """
     ckpt = expand_checkpoint.load(src)
     w = expand_checkpoint._weights(ckpt)[0]
     obs_size = expand_checkpoint._normalizer_size(w["model"])
-    if obs_size != 140:
-        print(f"[launch] {src}: actor input {obs_size}, assuming it is already widened")
+    state_size = expand_checkpoint._normalizer_size(w["assymetric_vf_nets"])
+    n_obs, n_state = target_obs - obs_size, target_state - state_size
+    assert n_obs >= 0 and n_state >= 0, f"{src} reads more inputs ({obs_size}/{state_size}) than the task provides"
+    if n_obs == 0 and n_state == 0:
+        print(f"[launch] {src}: inputs {obs_size}/{state_size} already match")
         return src
-    dst = os.path.splitext(src)[0] + f"_velocity_obs{140 + NEW_OBS}.pth"
+    dst = os.path.splitext(src)[0] + f"_obs{target_obs}_state{target_state}.pth"
     if not os.path.exists(dst):
-        new_ckpt, log = expand_checkpoint.expand_checkpoint(ckpt, NEW_OBS, NEW_STATE)
+        new_ckpt, log = expand_checkpoint.expand_checkpoint(ckpt, n_obs, n_state)
         print("\n".join(log))
-        expand_checkpoint.verify(w, expand_checkpoint._weights(new_ckpt)[0], NEW_OBS, NEW_STATE)
+        expand_checkpoint.verify(w, expand_checkpoint._weights(new_ckpt)[0], n_obs, n_state)
         torch.save(new_ckpt, dst)
-        print(f"[launch] widened checkpoint saved to {dst}")
+        print(f"[launch] widened checkpoint ({obs_size}/{state_size} -> {target_obs}/{target_state}) saved to {dst}")
     else:
         print(f"[launch] using cached widened checkpoint {dst}")
     return dst
 
 
-def configure_velocity(cfg):
+def configure_task(cfg, task: str):
+    """Velocity / trajectory task on top of the released config. Returns (target obs size, target state size)."""
+    t = TASKS[task]
     env = cfg.task.env
-    vel = OmegaConf.load(os.path.join(HERE, "velocity.yaml"))
-    env.velocity = vel
-    cfg.task.name = "SimToolRealVelocity"
-    cfg.task_name = "SimToolRealVelocity"
+    env.velocity = OmegaConf.load(os.path.join(HERE, "velocity.yaml"))
+    if task == "trajectory":
+        env.trajectory = OmegaConf.load(os.path.join(HERE, "trajectory.yaml"))
+    cfg.task.name = t["name"]
+    cfg.task_name = t["name"]
     obs = list(env.obsList)
     state = list(env.stateList)
     assert len(obs) == 10 and len(state) == 18, f"unexpected released obs/state lists: {obs} / {state}"
-    env.obsList = obs + VELOCITY_OBS
-    env.stateList = state + VELOCITY_OBS + VELOCITY_STATE_ONLY
+    env.obsList = obs + t["obs"]
+    env.stateList = state + t["state"]
     # The released config starts the tolerance curriculum at 0.075; the checkpoint was trained down to 0.01 but that
     # value lives in the env state, which weights-only loading does not restore.
     env.successTolerance = 0.01
+    return (BASE_OBS + sum(EXTRA_SIZES[k] for k in t["obs"]), BASE_STATE + sum(EXTRA_SIZES[k] for k in t["state"]))
 
 
 def install_load_and_warmup_patches(load_mode: str, warmup_epochs: int, base_lr: float):
@@ -160,7 +180,7 @@ def main():
     args = parse_args()
     assert args.num_envs % NUM_SAPG_BLOCKS == 0, f"--num-envs must be a multiple of {NUM_SAPG_BLOCKS}"
     assert args.name.split("_")[0].isdigit(), "--name must start with digits and '_' (e.g. 00_ft)"
-    velocity = args.task == "velocity"
+    velocity = args.task in ("velocity", "trajectory")
 
     cfg = read_cfg_omegaconf(config_path=args.config, device="cuda:0")
     cfg = merge_cfg_with_default_config(cfg)
@@ -189,9 +209,9 @@ def main():
 
     ckpt = os.path.abspath(args.checkpoint)
     if velocity:
-        configure_velocity(cfg)
+        target_obs, target_state = configure_task(cfg, args.task)
         if args.load_mode == "weights":
-            ckpt = os.path.abspath(widened_checkpoint(ckpt))
+            ckpt = os.path.abspath(widened_checkpoint(ckpt, target_obs, target_state))
     cfg.checkpoint = ckpt
     cfg.train.params.load_checkpoint = True
     cfg.train.params.load_path = ckpt
@@ -222,6 +242,8 @@ def main():
     if velocity:
         print(f"obsList {list(cfg.task.env.obsList)}\nstateList {list(cfg.task.env.stateList)}")
         print("velocity cfg:\n" + OmegaConf.to_yaml(cfg.task.env.velocity))
+        if args.task == "trajectory":
+            print("trajectory cfg:\n" + OmegaConf.to_yaml(cfg.task.env.trajectory))
 
     install_load_and_warmup_patches(args.load_mode, warmup, float(tc.learning_rate))
     launch_rlg_hydra(cfg)
