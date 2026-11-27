@@ -315,6 +315,15 @@ python dextoolbench/eval_isaacgym.py ... --config-path runs/20_vel_ft_v1/config.
 `fixedLevel` sets the arm-speed multiplier. It must match the level at the end of training, otherwise the policy runs
 at an arm speed it was not trained with.
 
+To run all 24 object/task pairs in one job (10 episodes each, the same protocol as the official
+`run_all_evals_isaacgym.py`) and write a summary to `evals/ft_<name>/summary.txt`:
+
+```bash
+sbatch --export=ALL,NAME=v2,CFG=runs/31_vel_ft_v2/config.yaml,CKPT=runs/31_vel_ft_v2/nn/last_31_vel_ft_v2_ep_3500_rew__10311.79_.pth,LEVEL=0.10 \
+    finetune_velocity/slurm/5_eval_dextoolbench_mig.sbatch
+python finetune_velocity/run_dextoolbench_eval.py --summarize evals/ft_v2 evals/ft_pretrained   # compare
+```
+
 ---
 
 ## 6. Logged metrics (TensorBoard: `runs/<name>/summaries`)

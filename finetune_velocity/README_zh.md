@@ -216,6 +216,14 @@ python dextoolbench/eval_isaacgym.py ... --config-path runs/20_vel_ft_v1/config.
 
 `fixedLevel` 决定臂速倍数，必须与训练结束时的 level 一致，否则策略会在另一个臂速下运行。
 
+一次跑完全部 24 个物体/任务组合（每个 10 个 episode，和官方 `run_all_evals_isaacgym.py` 的协议相同），并生成汇总 `evals/ft_<名字>/summary.txt`：
+
+```bash
+sbatch --export=ALL,NAME=v2,CFG=runs/31_vel_ft_v2/config.yaml,CKPT=runs/31_vel_ft_v2/nn/last_31_vel_ft_v2_ep_3500_rew__10311.79_.pth,LEVEL=0.10 \
+    finetune_velocity/slurm/5_eval_dextoolbench_mig.sbatch
+python finetune_velocity/run_dextoolbench_eval.py --summarize evals/ft_v2 evals/ft_pretrained   # 对比
+```
+
 ---
 
 ## 6. 日志指标（TensorBoard：`runs/<name>/summaries`）
